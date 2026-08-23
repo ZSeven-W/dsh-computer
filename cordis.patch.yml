@@ -1,0 +1,4 @@
+# dsh-computer bundle patch: mounts the headless macOS Computer Use driver.
+- insert:
+    - id: dsh-computer
+      name: '@zseven-w/dsh-computer'

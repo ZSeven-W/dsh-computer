@@ -1,0 +1,84 @@
+{
+  "name": "@zseven-w/dsh-computer",
+  "version": "0.1.0-rc.1",
+  "description": "A headless-first macOS Computer Use driver for DeepSeek Harness with expiring observations, live target preflight, and evidence-backed action receipts",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZSeven-W/dsh-computer.git"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "computer-use",
+    "accessibility",
+    "macos",
+    "automation",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./driver": {
+      "types": "./lib/contracts.d.ts",
+      "default": "./lib/contracts.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "native/Package.swift",
+    "native/Sources",
+    "native/Tests",
+    "cordis.patch.yml",
+    "README.md",
+    "README.*.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:node": "tsc -p tsconfig.json && node scripts/run-tests.mjs",
+    "test:swift": "node scripts/test-swift.mjs",
+    "test:native-protocol": "node scripts/native-protocol-smoke.mjs",
+    "test": "npm run test:node && npm run test:swift && npm run test:native-protocol",
+    "prepack": "npm run build && npm test",
+    "prepublishOnly": "npm run smoke:pack",
+    "smoke:pack": "node scripts/smoke-pack.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "capabilities": [
+      "env-read",
+      "global-hook",
+      "subprocess",
+      "tool-registration"
+    ]
+  },
+  "dshHostRuntime": {
+    "services": [
+      "tools"
+    ],
+    "note": "Host services are consumed structurally at runtime and are intentionally absent from dependencies and peerDependencies."
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
