@@ -16,6 +16,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("AppKit"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("Security"),
             ]
         ),
         .testTarget(name: "ComputerCoreTests", dependencies: ["ComputerCore"]),

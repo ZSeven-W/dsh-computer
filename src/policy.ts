@@ -1,17 +1,21 @@
 import type { ComputerAction, ComputerModifier, ComputerTarget } from './contracts.js'
 
-const HIGH_RISK_PATTERNS = [
-  /\b(delete|erase|remove|uninstall|destroy|wipe)\b/iu,
-  /\b(pay|purchase|buy now|checkout|transfer|wire|send money|place order)\b/iu,
-  /\b(send|publish|post|submit|share)\b/iu,
-  /删除|清除|抹掉|卸载|销毁|付款|支付|购买|下单|转账|汇款|发送|发布|提交|分享/u,
+interface SemanticRiskPattern {
+  readonly category: 'destructive' | 'financial' | 'external-commit'
+  readonly pattern: RegExp
+}
+
+const HIGH_RISK_PATTERNS: readonly SemanticRiskPattern[] = [
+  { category: 'destructive', pattern: /\b(delete|erase|remove|uninstall|destroy|wipe)\b|删除|清除|抹掉|卸载|销毁/iu },
+  { category: 'financial', pattern: /\b(pay|purchase|buy now|checkout|transfer|wire|send money|place order)\b|付款|支付|购买|下单|转账|汇款/iu },
+  { category: 'external-commit', pattern: /\b(send|publish|post|submit|share)\b|发送|发布|提交|分享/iu },
 ]
 
 const COMMIT_KEYS = new Set(['return', 'enter', 'numpadenter', '\n', '\r', '↩'])
 
 // A cross-application driver cannot assume an app's printable-key shortcuts
-// are harmless. Until host-owned approval exists, key actions are navigation
-// only; text entry belongs in the separately guarded `type` action.
+// are harmless. Navigation is the only class that can run without a host
+// decision; every other chord is eligible only for a one-action approval.
 const SAFE_KEY_CHORDS = new Set([
   'tab', 'shift+tab', 'escape',
   'left', 'right', 'up', 'down',
@@ -22,6 +26,20 @@ const SAFE_KEY_CHORDS = new Set([
   'shift+home', 'shift+end', 'shift+pageup', 'shift+pagedown',
 ])
 
+export type ComputerActionRisk =
+  | { readonly kind: 'safe' }
+  | {
+      readonly kind: 'hard-deny'
+      readonly code: 'secure-text'
+      readonly reason: string
+    }
+  | {
+      readonly kind: 'approval-required'
+      readonly code: 'dangerous-click' | 'commit-key' | 'unsafe-key-chord'
+      readonly category: 'destructive' | 'financial' | 'external-commit' | 'commit-key' | 'unsafe-key-chord'
+      readonly reason: string
+    }
+
 function targetSemantics(target: Pick<ComputerTarget, 'name' | 'identifier' | 'role' | 'subrole'>): string {
   return [target.name, target.identifier, target.role, target.subrole]
     .filter((value): value is string => typeof value === 'string')
@@ -29,32 +47,73 @@ function targetSemantics(target: Pick<ComputerTarget, 'name' | 'identifier' | 'r
     .normalize('NFKC')
 }
 
-export function deterministicRiskReason(
+/** Normalize aliases before dispatch so every approved commit key is executable. */
+export function normalizeKeyName(value: string): string {
+  const normalized = value.trim().toLowerCase()
+  if (value === '\n' || value === '\r' || normalized === '↩' || normalized === 'numpadenter') return 'return'
+  if (normalized === 'enter') return 'return'
+  return normalized
+}
+
+function normalizedChord(action: Extract<ComputerAction, { kind: 'key' }>): string {
+  return [...new Set<string>(action.modifiers ?? [])].sort().concat(normalizeKeyName(action.key)).join('+')
+}
+
+/**
+ * Deterministic policy computed only from the requested operation and the
+ * re-observed AX target. Model-provided risk or approval claims do not exist.
+ */
+export function classifyComputerActionRisk(
   action: ComputerAction,
   target: Pick<ComputerTarget, 'name' | 'identifier' | 'role' | 'subrole' | 'secure'>,
-): string | null {
+): ComputerActionRisk {
   if (action.kind === 'type' && target.secure) {
-    return 'secure text entry is blocked'
+    return { kind: 'hard-deny', code: 'secure-text', reason: 'secure text entry is permanently blocked' }
   }
 
   if (action.kind === 'key') {
     const key = action.key.trim().toLowerCase()
-    if (COMMIT_KEYS.has(key)) {
-      return `commit key is blocked until a host-owned approval flow exists: ${key || 'newline'}`
+    if (COMMIT_KEYS.has(key) || action.key === '\n' || action.key === '\r') {
+      return {
+        kind: 'approval-required',
+        code: 'commit-key',
+        category: 'commit-key',
+        reason: 'commit key requires one-action host approval',
+      }
     }
-    const normalized = [...new Set<string>(action.modifiers ?? [])].sort().concat(key).join('+')
-    if (!SAFE_KEY_CHORDS.has(normalized)) {
-      return `key chord is outside the explicit safe navigation allowlist: ${normalized}`
+    const chord = normalizedChord(action)
+    if (!SAFE_KEY_CHORDS.has(chord)) {
+      return {
+        kind: 'approval-required',
+        code: 'unsafe-key-chord',
+        category: 'unsafe-key-chord',
+        reason: 'key chord outside the safe navigation allowlist requires one-action host approval',
+      }
     }
   }
 
-  if (action.kind === 'click' || action.kind === 'key') {
+  if (action.kind === 'click') {
     const semantics = targetSemantics(target)
-    for (const pattern of HIGH_RISK_PATTERNS) {
-      if (pattern.test(semantics)) return `high-risk target semantics are blocked: ${pattern.source}`
+    const match = HIGH_RISK_PATTERNS.find(candidate => candidate.pattern.test(semantics))
+    if (match) {
+      return {
+        kind: 'approval-required',
+        code: 'dangerous-click',
+        category: match.category,
+        reason: `target semantics indicate a ${match.category} operation and require one-action host approval`,
+      }
     }
   }
-  return null
+  return { kind: 'safe' }
+}
+
+/** Backward-compatible summary for consumers that only need deny/ask text. */
+export function deterministicRiskReason(
+  action: ComputerAction,
+  target: Pick<ComputerTarget, 'name' | 'identifier' | 'role' | 'subrole' | 'secure'>,
+): string | null {
+  const risk = classifyComputerActionRisk(action, target)
+  return risk.kind === 'safe' ? null : risk.reason
 }
 
 export function normalizeModifiers(value: readonly string[] | undefined): ComputerModifier[] {

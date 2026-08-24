@@ -10,37 +10,285 @@ final class ComputerCoreTests: XCTestCase {
         )
     }
 
-    func testBlocksSecureTypingWithoutCallerSensitivityFlag() {
-        let reason = RiskPolicy.rejection(action: ActionPayload(kind: "type", text: "secret"), target: target(secure: true))
-        XCTAssertEqual(reason, "secure text entry is blocked")
+    private func approval(
+        action: ActionPayload,
+        riskCode: ActionRiskCode,
+        mutate: ((inout [String: Any]) -> Void)? = nil
+    ) throws -> HostApprovalGrant {
+        var object: [String: Any] = [
+            "outcome": "allowed-once",
+            "observationId": "obs_fixture-1",
+            "observationFingerprint": String(repeating: "a", count: 64),
+            "riskCode": riskCode.rawValue,
+            "actionDigest": try XCTUnwrap(ActionApprovalBinding.digest(action: action)),
+            "nonce": String(repeating: "A", count: 43),
+            "refDigest": String(repeating: "b", count: 64),
+        ]
+        mutate?(&object)
+        return try JSONDecoder().decode(HostApprovalGrant.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
-    func testBlocksDestructiveAndFinancialSemantics() {
-        XCTAssertNotNil(RiskPolicy.rejection(action: ActionPayload(kind: "click"), target: target(name: "Delete account")))
-        XCTAssertNotNil(RiskPolicy.rejection(action: ActionPayload(kind: "click"), target: target(name: "确认支付")))
-        XCTAssertNil(RiskPolicy.rejection(action: ActionPayload(kind: "click"), target: target(name: "Open settings")))
+    func testInteractiveSessionRequiresAllPositiveSignals() {
+        let available = InteractiveSessionPolicy.evaluate(InteractiveSessionSignals(
+            frontmostBundleIdentifier: "dev.example.Editor",
+            loginDone: true,
+            onConsole: true,
+            screenLocked: false
+        ))
+        XCTAssertEqual(
+            available,
+            InteractiveSessionAvailability(sessionLocked: false, interactiveSessionAvailable: true)
+        )
     }
 
-    func testBlocksCommitKeysEvenWithoutModelSuppliedRiskMetadata() {
-        XCTAssertNotNil(RiskPolicy.rejection(action: ActionPayload(kind: "key", key: "Return"), target: target(name: "Message")))
-        XCTAssertNotNil(RiskPolicy.rejection(action: ActionPayload(kind: "key", key: "enter", modifiers: ["shift"]), target: target(name: "Editor")))
+    func testUnlockedWindowServerMayOmitScreenLockedKey() {
+        let available = InteractiveSessionPolicy.evaluate(InteractiveSessionSignals(
+            frontmostBundleIdentifier: "dev.example.Editor",
+            loginDone: true,
+            onConsole: true,
+            screenLocked: nil
+        ))
+        XCTAssertEqual(
+            available,
+            InteractiveSessionAvailability(sessionLocked: false, interactiveSessionAvailable: true)
+        )
+    }
+
+    func testLoginWindowAlwaysFailsClosedEvenWhenCGSessionIsLoggedInOnConsole() {
+        let locked = InteractiveSessionPolicy.evaluate(InteractiveSessionSignals(
+            frontmostBundleIdentifier: InteractiveSessionPolicy.loginWindowBundleIdentifier,
+            loginDone: true,
+            onConsole: true,
+            screenLocked: true
+        ))
+        XCTAssertEqual(
+            locked,
+            InteractiveSessionAvailability(sessionLocked: true, interactiveSessionAvailable: false)
+        )
+    }
+
+    func testIncompleteOffConsoleAndMissingSessionSignalsFailClosed() {
+        let cases = [
+            InteractiveSessionSignals(
+                frontmostBundleIdentifier: "dev.example.Editor", loginDone: false,
+                onConsole: true, screenLocked: false
+            ),
+            InteractiveSessionSignals(
+                frontmostBundleIdentifier: "dev.example.Editor", loginDone: true,
+                onConsole: false, screenLocked: false
+            ),
+            InteractiveSessionSignals(
+                frontmostBundleIdentifier: "dev.example.Editor", loginDone: true,
+                onConsole: true, screenLocked: true
+            ),
+        ]
+        for signals in cases {
+            XCTAssertEqual(
+                InteractiveSessionPolicy.evaluate(signals),
+                InteractiveSessionAvailability(sessionLocked: true, interactiveSessionAvailable: false)
+            )
+        }
+    }
+
+    func testMissingSignalsAreUnavailableWithoutClaimingAProvenLock() {
+        let cases = [
+            InteractiveSessionSignals(
+                frontmostBundleIdentifier: "dev.example.Editor", loginDone: nil,
+                onConsole: true, screenLocked: false
+            ),
+            InteractiveSessionSignals(
+                frontmostBundleIdentifier: nil, loginDone: true,
+                onConsole: true, screenLocked: false
+            ),
+            InteractiveSessionSignals(
+                frontmostBundleIdentifier: nil, loginDone: nil,
+                onConsole: nil, screenLocked: nil
+            ),
+        ]
+        for signals in cases {
+            XCTAssertEqual(
+                InteractiveSessionPolicy.evaluate(signals),
+                InteractiveSessionAvailability(sessionLocked: false, interactiveSessionAvailable: false)
+            )
+        }
+    }
+
+    func testSecureTypingIsAPermanentHardDeny() {
+        XCTAssertEqual(
+            RiskPolicy.classify(action: ActionPayload(kind: "type", text: "secret"), target: target(secure: true)),
+            .hardDeny(code: .secureText, reason: "secure text entry is permanently blocked")
+        )
+    }
+
+    func testDangerousClickSemanticsRequireApprovalWithoutSubstringFalsePositives() {
+        XCTAssertEqual(
+            RiskPolicy.classify(action: ActionPayload(kind: "click"), target: target(name: "Delete account")),
+            .approvalRequired(
+                code: .dangerousClick,
+                reason: "target semantics indicate a destructive operation and require one-action host approval"
+            )
+        )
+        XCTAssertEqual(
+            RiskPolicy.classify(action: ActionPayload(kind: "click"), target: target(name: "确认支付")),
+            .approvalRequired(
+                code: .dangerousClick,
+                reason: "target semantics indicate a financial operation and require one-action host approval"
+            )
+        )
+        XCTAssertEqual(
+            RiskPolicy.classify(action: ActionPayload(kind: "click"), target: target(name: "Open sender settings")),
+            .safe
+        )
+    }
+
+    func testCommitKeysRequireApprovalEvenWithoutModelSuppliedRiskMetadata() {
+        for key in ["Return", "enter", "numpadenter", "\n", "\r", "↩"] {
+            XCTAssertEqual(
+                RiskPolicy.classify(action: ActionPayload(kind: "key", key: key), target: target(name: "Message")),
+                .approvalRequired(code: .commitKey, reason: "commit key requires one-action host approval")
+            )
+        }
     }
 
     func testKeyPolicyIsAnExplicitNavigationAllowlist() {
-        XCTAssertNotNil(RiskPolicy.rejection(
-            action: ActionPayload(kind: "key", key: "j", modifiers: ["control"]), target: target(name: "Editor")
+        for (key, modifiers) in [("j", ["control"]), ("m", ["control"]), ("k", ["command"])] {
+            XCTAssertEqual(
+                RiskPolicy.classify(
+                    action: ActionPayload(kind: "key", key: key, modifiers: modifiers), target: target(name: "Editor")
+                ),
+                .approvalRequired(
+                    code: .unsafeKeyChord,
+                    reason: "key chord outside the safe navigation allowlist requires one-action host approval"
+                )
+            )
+        }
+        XCTAssertEqual(
+            RiskPolicy.classify(
+                action: ActionPayload(kind: "key", key: "left", modifiers: ["option"]), target: target(name: "Editor")
+            ),
+            .safe
+        )
+        XCTAssertEqual(
+            RiskPolicy.classify(
+                action: ActionPayload(kind: "key", key: "tab", modifiers: ["shift"]), target: target(name: "Editor")
+            ),
+            .safe
+        )
+    }
+
+    func testFocusPlainTypingAndOrdinaryClickAreSafe() {
+        XCTAssertEqual(RiskPolicy.classify(action: ActionPayload(kind: "focus"), target: target()), .safe)
+        XCTAssertEqual(RiskPolicy.classify(action: ActionPayload(kind: "type", text: "hello"), target: target()), .safe)
+        XCTAssertEqual(RiskPolicy.classify(action: ActionPayload(kind: "click"), target: target(name: "Open")), .safe)
+    }
+
+    func testActionDigestMatchesTheTypeScriptCanonicalV1Contract() {
+        XCTAssertEqual(
+            ActionApprovalBinding.digest(action: ActionPayload(kind: "click")),
+            "fa80c81977738372f15520edacfcee5d110152a43b1c7d971835f85644fd0cc4"
+        )
+        XCTAssertEqual(
+            ActionApprovalBinding.digest(action: ActionPayload(kind: "key", key: "Enter")),
+            "402002130f1cf3545a39e173c86e203a96d2e6287be919e727ae5e83f37ba66a"
+        )
+        XCTAssertEqual(
+            ActionApprovalBinding.digest(
+                action: ActionPayload(kind: "key", key: "j", modifiers: ["control", "control"])
+            ),
+            "7fdde1edb66a213c14c12c35b7d1eb61587f33f828d23c884ceff049497c5a08"
+        )
+        XCTAssertEqual(
+            ActionApprovalBinding.digest(action: ActionPayload(kind: "type", text: "你好\nA")),
+            "88c3705d1f11f4d4f17a491f24b2be04f41536b51577a24db23d48a7ec4741a9"
+        )
+        XCTAssertNil(ActionApprovalBinding.digest(
+            action: ActionPayload(kind: "key", key: "j", modifiers: ["caps-lock"])
         ))
-        XCTAssertNotNil(RiskPolicy.rejection(
-            action: ActionPayload(kind: "key", key: "m", modifiers: ["control"]), target: target(name: "Editor")
-        ))
-        XCTAssertNotNil(RiskPolicy.rejection(
-            action: ActionPayload(kind: "key", key: "k", modifiers: ["command"]), target: target(name: "Editor")
+    }
+
+    func testApprovalDecoderRequiresAnExactBoundedGrantShape() throws {
+        let action = ActionPayload(kind: "click")
+        let valid = try approval(action: action, riskCode: .dangerousClick)
+        XCTAssertEqual(valid.outcome, "allowed-once")
+        XCTAssertEqual(valid.observationId, "obs_fixture-1")
+        XCTAssertEqual(valid.riskCode, .dangerousClick)
+
+        let invalidMutations: [(inout [String: Any]) -> Void] = [
+            { $0["outcome"] = "rejected" },
+            { $0["observationId"] = "" },
+            { $0["observationId"] = "fixture-1" },
+            { $0["observationId"] = "obs_" + String(repeating: "a", count: 125) },
+            { $0["observationFingerprint"] = String(repeating: "A", count: 64) },
+            { $0["actionDigest"] = String(repeating: "0", count: 63) },
+            { $0["refDigest"] = String(repeating: "g", count: 64) },
+            { $0["riskCode"] = "secure-text" },
+            { $0["nonce"] = String(repeating: "A", count: 42) },
+            { $0["unexpected"] = "field" },
+            { $0.removeValue(forKey: "refDigest") },
+        ]
+        for mutation in invalidMutations {
+            XCTAssertThrowsError(try approval(action: action, riskCode: .dangerousClick, mutate: mutation))
+        }
+    }
+
+    func testValidOneActionGrantsAuthorizeOnlyTheirExactRiskAndAction() throws {
+        let dangerousClick = ActionPayload(kind: "click")
+        let returnKey = ActionPayload(kind: "key", key: "Return")
+        let controlJ = ActionPayload(kind: "key", key: "j", modifiers: ["control"])
+
+        XCTAssertNil(RiskPolicy.rejection(
+            action: dangerousClick,
+            target: target(name: "Delete account"),
+            approval: try approval(action: dangerousClick, riskCode: .dangerousClick)
         ))
         XCTAssertNil(RiskPolicy.rejection(
-            action: ActionPayload(kind: "key", key: "left", modifiers: ["option"]), target: target(name: "Editor")
+            action: returnKey,
+            target: target(name: "Message"),
+            approval: try approval(action: returnKey, riskCode: .commitKey)
         ))
         XCTAssertNil(RiskPolicy.rejection(
-            action: ActionPayload(kind: "key", key: "tab", modifiers: ["shift"]), target: target(name: "Editor")
+            action: controlJ,
+            target: target(name: "Editor"),
+            approval: try approval(action: controlJ, riskCode: .unsafeKeyChord)
+        ))
+
+        XCTAssertNotNil(RiskPolicy.rejection(
+            action: dangerousClick, target: target(name: "Delete account"), approval: nil
+        ))
+        XCTAssertNotNil(RiskPolicy.rejection(
+            action: dangerousClick,
+            target: target(name: "Delete account"),
+            approval: try approval(action: dangerousClick, riskCode: .commitKey)
+        ))
+        XCTAssertNotNil(RiskPolicy.rejection(
+            action: dangerousClick,
+            target: target(name: "Delete account"),
+            approval: try approval(action: dangerousClick, riskCode: .dangerousClick) {
+                $0["actionDigest"] = String(repeating: "0", count: 64)
+            }
+        ))
+    }
+
+    func testSecureTypingStaysDeniedEvenWithAWellFormedGrant() throws {
+        let secureType = ActionPayload(kind: "type", text: "secret")
+        XCTAssertEqual(
+            RiskPolicy.rejection(
+                action: secureType,
+                target: target(secure: true),
+                approval: try approval(action: secureType, riskCode: .dangerousClick)
+            ),
+            "secure text entry is permanently blocked"
+        )
+    }
+
+    func testApprovalInsideActionPayloadCannotAuthorizeAnything() throws {
+        let nested = try JSONSerialization.data(withJSONObject: [
+            "kind": "click",
+            "approval": ["outcome": "allowed-once", "nonce": "PRIVATE-GRANT"],
+        ])
+        let action = try JSONDecoder().decode(ActionPayload.self, from: nested)
+        XCTAssertNotNil(RiskPolicy.rejection(
+            action: action, target: target(name: "Delete account"), approval: nil
         ))
     }
 
@@ -86,5 +334,45 @@ final class ComputerCoreTests: XCTestCase {
         let frame = ComputerFrame(x: -0.0, y: -0.0, width: 1, height: 1)
         XCTAssertEqual(frame.x.sign, .plus)
         XCTAssertEqual(frame.y.sign, .plus)
+    }
+
+    func testProtocolIdentitiesEncodeRequiredOptionalFieldsAsExplicitNull() throws {
+        func object<T: Encodable>(_ value: T) throws -> [String: Any] {
+            try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any]
+            )
+        }
+
+        let app = AppIdentity(bundleId: "dev.example.App", pid: 42, launchIdentity: nil, name: nil)
+        let encodedApp = try object(app)
+        XCTAssertEqual(Set(encodedApp.keys), Set(["bundleId", "pid", "launchIdentity", "name"]))
+        XCTAssertTrue(encodedApp["launchIdentity"] is NSNull)
+        XCTAssertTrue(encodedApp["name"] is NSNull)
+
+        let window = WindowIdentity(
+            number: nil, role: "AXWindow", subrole: nil, title: nil, frame: nil, identity: "window-digest"
+        )
+        let encodedWindow = try object(window)
+        XCTAssertEqual(Set(encodedWindow.keys), Set(["number", "role", "subrole", "title", "frame", "identity"]))
+        for key in ["number", "subrole", "title", "frame"] {
+            XCTAssertTrue(encodedWindow[key] is NSNull, "expected explicit null for window.\(key)")
+        }
+
+        let element = ElementIdentity(
+            role: "AXUnknown", subrole: nil, name: nil, identifier: nil, frame: nil,
+            enabled: nil, focused: nil, secure: true, actions: [], value: "must-be-redacted"
+        )
+        let encodedElement = try object(element)
+        XCTAssertEqual(
+            Set(encodedElement.keys),
+            Set(["role", "subrole", "name", "identifier", "frame", "enabled", "focused", "secure", "actions", "value"])
+        )
+        for key in ["subrole", "name", "identifier", "frame", "enabled", "focused", "value"] {
+            XCTAssertTrue(encodedElement[key] is NSNull, "expected explicit null for element.\(key)")
+        }
+
+        XCTAssertEqual(try JSONDecoder().decode(AppIdentity.self, from: JSONEncoder().encode(app)), app)
+        XCTAssertEqual(try JSONDecoder().decode(WindowIdentity.self, from: JSONEncoder().encode(window)), window)
+        XCTAssertEqual(try JSONDecoder().decode(ElementIdentity.self, from: JSONEncoder().encode(element)), element)
     }
 }

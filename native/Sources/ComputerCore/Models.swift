@@ -35,6 +35,18 @@ public struct AppIdentity: Codable, Equatable, Sendable {
         self.launchIdentity = launchIdentity
         self.name = name
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case bundleId, pid, launchIdentity, name
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(bundleId, forKey: .bundleId)
+        try container.encode(pid, forKey: .pid)
+        try container.encode(launchIdentity, forKey: .launchIdentity)
+        try container.encode(name, forKey: .name)
+    }
 }
 
 public struct WindowIdentity: Codable, Equatable, Sendable {
@@ -52,6 +64,20 @@ public struct WindowIdentity: Codable, Equatable, Sendable {
         self.title = title
         self.frame = frame
         self.identity = identity
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case number, role, subrole, title, frame, identity
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(number, forKey: .number)
+        try container.encode(role, forKey: .role)
+        try container.encode(subrole, forKey: .subrole)
+        try container.encode(title, forKey: .title)
+        try container.encode(frame, forKey: .frame)
+        try container.encode(identity, forKey: .identity)
     }
 }
 
@@ -89,6 +115,24 @@ public struct ElementIdentity: Codable, Equatable, Sendable {
         self.secure = secure
         self.actions = actions
         self.value = secure ? nil : value
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case role, subrole, name, identifier, frame, enabled, focused, secure, actions, value
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        try container.encode(subrole, forKey: .subrole)
+        try container.encode(name, forKey: .name)
+        try container.encode(identifier, forKey: .identifier)
+        try container.encode(frame, forKey: .frame)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(focused, forKey: .focused)
+        try container.encode(secure, forKey: .secure)
+        try container.encode(actions, forKey: .actions)
+        try container.encode(value, forKey: .value)
     }
 }
 

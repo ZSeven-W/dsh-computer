@@ -1,7 +1,7 @@
 /** Stable service name exposed through Cordis for dsh-qa and other drivers. */
 export const COMPUTER_DRIVER_SERVICE = 'zsevenComputerDriver' as const
 
-export const COMPUTER_DRIVER_CONTRACT_VERSION = 1 as const
+export const COMPUTER_DRIVER_CONTRACT_VERSION = 2 as const
 
 export interface ComputerFrame {
   x: number
@@ -89,6 +89,76 @@ export interface ComputerObservation {
   }
 }
 
+export interface ComputerVisualObserveRequest {
+  /** Exact opaque observation id returned by computer_observe in the same Agent scope. */
+  observationId: string
+  /** Set-of-Mark budget, clamped to 1...200. Defaults to 80. */
+  maxMarks?: number
+}
+
+export type ComputerCapturableWindowIdentity = Omit<ComputerWindowIdentity, 'number' | 'frame'> & {
+  number: number
+  frame: ComputerFrame
+}
+
+export interface ComputerVisualQuality {
+  classification: 'usable' | 'transparent' | 'mostly-transparent' | 'near-black' | 'near-white' | 'near-uniform'
+  usable: boolean
+  sampleCount: number
+  visibleFraction: number
+  meanLuminance: number
+  luminanceVariance: number
+  luminanceRange: number
+  darkFraction: number
+  lightFraction: number
+  distinctColorBuckets: number
+}
+
+export interface ComputerVisualMark {
+  number: number
+  /** Opaque action ref from the source observation. */
+  ref: string
+  /** Stable zero-based index in the source Accessibility observation. */
+  sourceIndex: number
+  /** Top-origin pixels in the native captured PNG, before attachment normalization. */
+  nativePixelFrame: ComputerFrame
+}
+
+export interface ComputerVisualOmission {
+  ref: string
+  sourceIndex: number
+  reason: string
+}
+
+/**
+ * Driver-level visual result. The PNG remains in process memory for the host
+ * attachment service; model-facing tool JSON must project metadata only.
+ */
+export interface ComputerVisualCapture {
+  observationId: string
+  observationFingerprint: string
+  capturedAt: string
+  expiresAt: string
+  app: ComputerAppIdentity
+  window: ComputerCapturableWindowIdentity
+  png: Uint8Array
+  capture: {
+    artifact: {
+      format: 'png'
+      byteLength: number
+      sha256: string
+    }
+    pointFrame: ComputerFrame
+    pixelWidth: number
+    pixelHeight: number
+    scaleX: number
+    scaleY: number
+    quality: ComputerVisualQuality
+  }
+  marks: ComputerVisualMark[]
+  omitted: ComputerVisualOmission[]
+}
+
 export type ComputerModifier = 'command' | 'control' | 'option' | 'shift' | 'fn'
 
 export type ComputerAction =
@@ -125,6 +195,41 @@ export interface ComputerHelperStatus {
   platform: 'macos' | 'unsupported'
   helper: 'ready' | 'not-built' | 'unavailable'
   accessibilityTrusted: boolean | null
+  screenRecordingTrusted: boolean | null
+  sessionLocked: boolean | null
+  interactiveSessionAvailable: boolean | null
+  helperVersion: string | null
+  helperExecutable: string | null
+  bundle: {
+    path: string | null
+    identifier: string | null
+    version: string | null
+  } | null
+  signing: {
+    signed: boolean
+    kind: 'development' | 'developer-id' | 'distribution' | 'other' | 'adhoc' | 'unsigned'
+    codeIdentifier: string | null
+    teamIdentifier: string | null
+    authorities: string[]
+    cdhash: string | null
+    statusCode: number
+    detail: string | null
+  } | null
+  process: {
+    pid: number
+    ppid: number
+  } | null
+  caller: {
+    pid: number
+    executable: string | null
+    bundleIdentifier: string | null
+    name: string | null
+  } | null
+  resolution: {
+    source: 'explicit-override' | 'installed-app' | 'worktree-build' | 'cache-build'
+    selectedPath: string
+  } | null
+  identityStable: boolean | null
   detail: string
 }
 
@@ -137,6 +242,18 @@ export interface ComputerEvidence {
   receipts: ComputerActionReceipt[]
 }
 
+/** Closed vocabulary returned by DSH's host-owned approval service. */
+export type ComputerApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
+/**
+ * A one-call approval gate bound by the host tool runtime. It deliberately
+ * carries no Agent or call id: those are captured from ToolRunContext by the
+ * computer_act implementation and can never come from model arguments.
+ */
+export interface ComputerApprovalGate {
+  request(reason: string): Promise<ComputerApprovalOutcome>
+}
+
 /**
  * Context supplied by a trusted host integration. `scopeId` must come from the
  * live Agent/session identity, never from model arguments.
@@ -144,6 +261,8 @@ export interface ComputerEvidence {
 export interface ComputerDriverContext {
   scopeId: string
   signal?: AbortSignal
+  /** Present only for a host tool execution that can ask the owning user. */
+  approval?: ComputerApprovalGate
 }
 
 /** Public, implementation-neutral contract consumed by dsh-qa. */
@@ -152,6 +271,7 @@ export interface ComputerDriver {
   readonly platform: 'macos'
   readonly contractVersion: typeof COMPUTER_DRIVER_CONTRACT_VERSION
   observe(request: ComputerObserveRequest, context: ComputerDriverContext): Promise<ComputerObservation>
+  visualObserve(request: ComputerVisualObserveRequest, context: ComputerDriverContext): Promise<ComputerVisualCapture>
   act(action: ComputerAction, context: ComputerDriverContext): Promise<ComputerActionReceipt>
   evidence(context: ComputerDriverContext, options?: { limit?: number }): Promise<ComputerEvidence>
   disposeScope(scopeId: string): Promise<void>

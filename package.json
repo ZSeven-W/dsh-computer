@@ -1,7 +1,7 @@
 {
   "name": "@zseven-w/dsh-computer",
   "version": "0.1.0-rc.1",
-  "description": "A headless-first macOS Computer Use driver for DeepSeek Harness with expiring observations, live target preflight, and evidence-backed action receipts",
+  "description": "A headless-first macOS Computer Use driver for DeepSeek Harness with AX-first observations, window-bound multimodal evidence, host-owned approval, and evidence-backed action receipts",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -44,6 +44,7 @@
     "native/Package.swift",
     "native/Sources",
     "native/Tests",
+    "scripts/install-local-helper.mjs",
     "cordis.patch.yml",
     "README.md",
     "README.*.md",
@@ -55,6 +56,7 @@
     "test:node": "tsc -p tsconfig.json && node scripts/run-tests.mjs",
     "test:swift": "node scripts/test-swift.mjs",
     "test:native-protocol": "node scripts/native-protocol-smoke.mjs",
+    "helper:install-local": "node scripts/install-local-helper.mjs",
     "test": "npm run test:node && npm run test:swift && npm run test:native-protocol",
     "prepack": "npm run build && npm test",
     "prepublishOnly": "npm run smoke:pack",
@@ -73,9 +75,12 @@
   },
   "dshHostRuntime": {
     "services": [
-      "tools"
+      "tools",
+      "approval",
+      "attachments",
+      "llm"
     ],
-    "note": "Host services are consumed structurally at runtime and are intentionally absent from dependencies and peerDependencies."
+    "note": "Only tools is a hard activation dependency. Approval, attachments, and llm are resolved structurally and lazily for risky actions and visual observation; all host services are intentionally absent from dependencies and peerDependencies."
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -64,8 +64,12 @@ try {
   }
   for (const relative of [
     'cordis.patch.yml', 'README.md', 'README.zh.md', 'lib/index.js', 'lib/index.d.ts',
-    'lib/contracts.js', 'lib/contracts.d.ts', 'native/Package.swift',
+    'lib/contracts.js', 'lib/contracts.d.ts', 'lib/capture-native.js', 'lib/vision.js',
+    'native/Package.swift', 'scripts/install-local-helper.mjs',
     'native/Sources/DSHComputerHelper/main.swift', 'native/Sources/ComputerCore/Models.swift',
+    'native/Sources/ComputerCore/InteractiveSession.swift',
+    'native/Sources/ComputerCore/VisualCapture.swift',
+    'native/Sources/ComputerCore/WindowNumberMatching.swift',
   ]) await access(join(installed, relative))
 
   const manifest = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8'))
@@ -87,18 +91,20 @@ try {
   let nativeDetail = 'native installed-helper smoke skipped on non-macOS'
   if (process.platform === 'darwin') {
     const helperCache = join(scratch, 'installed-helper-cache')
+    const absentStableHelper = join(scratch, 'no-installed-helper.app', 'Contents', 'MacOS', 'dsh-computer-helper')
     const nativeProbe = [
       "import { NativeHelper, NativeHelperError } from '@zseven-w/dsh-computer';",
-      `const helper = new NativeHelper({ packageRoot: ${JSON.stringify(installed)}, cacheRoot: ${JSON.stringify(helperCache)} });`,
+      `const helper = new NativeHelper({ packageRoot: ${JSON.stringify(installed)}, cacheRoot: ${JSON.stringify(helperCache)}, stableBinaryPath: ${JSON.stringify(absentStableHelper)} });`,
       "try {",
       "  const status = await helper.request({ id: 'packed-status', command: 'status' }, { scopeId: 'packed-smoke' });",
-      "  if (status.platform !== 'macos' || typeof status.accessibilityTrusted !== 'boolean') throw new Error('bad native status');",
+      "  if (status.platform !== 'macos' || typeof status.accessibilityTrusted !== 'boolean' || typeof status.screenRecordingTrusted !== 'boolean' || typeof status.sessionLocked !== 'boolean' || typeof status.interactiveSessionAvailable !== 'boolean') throw new Error('bad native status');",
+      "  if (status.resolution.source !== 'cache-build' || status.identityStable !== false) throw new Error('packed smoke did not build its own development helper');",
       "  let observed;",
       "  try {",
       "    const value = await helper.request({ id: 'packed-observe', command: 'observe', app: null, window: null, maxDepth: 1, maxNodes: 4 }, { scopeId: 'packed-smoke' });",
       "    observed = { ok: true, nodes: value.nodes.length, truncated: value.truncated };",
       "  } catch (error) {",
-      "    if (!(error instanceof NativeHelperError) || error.code !== 'accessibility_permission_required') throw error;",
+      "    if (!(error instanceof NativeHelperError) || !['accessibility_permission_required', 'session_locked'].includes(error.code)) throw error;",
       "    observed = { ok: false, code: error.code };",
       "  }",
       "  process.stdout.write(JSON.stringify({ status, observed }));",

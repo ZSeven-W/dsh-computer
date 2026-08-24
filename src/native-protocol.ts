@@ -34,11 +34,92 @@ export interface NativeObserveResult {
   truncated: boolean
 }
 
+export type NativeCapturableWindowIdentity = Omit<ComputerWindowIdentity, 'number' | 'frame'> & {
+  number: number
+  frame: ComputerFrame
+}
+
+export interface NativeCaptureTarget {
+  /** Opaque, Agent-private reference minted by the controller. */
+  ref: string
+  /** Stable index in the source Accessibility observation. */
+  index: number
+  element: NativeElementIdentity
+  locator: number[]
+}
+
+export interface NativeCaptureInput {
+  app: ComputerAppIdentity
+  window: NativeCapturableWindowIdentity
+  targets: NativeCaptureTarget[]
+  /** Created by capture-native.ts; never accepted from model/tool arguments. */
+  outputPath: string
+}
+
+export interface NativeCaptureQuality {
+  classification: 'usable' | 'transparent' | 'mostly-transparent' | 'near-black' | 'near-white' | 'near-uniform'
+  usable: boolean
+  sampleCount: number
+  visibleFraction: number
+  meanLuminance: number
+  luminanceVariance: number
+  luminanceRange: number
+  darkFraction: number
+  lightFraction: number
+  distinctColorBuckets: number
+}
+
+export interface NativeCaptureMark {
+  number: number
+  ref: string
+  index: number
+  /** Top-origin pixel coordinates in the returned PNG. */
+  pixelFrame: ComputerFrame
+}
+
+export interface NativeCaptureOmission {
+  ref: string
+  index: number
+  reason: string
+}
+
+export interface NativeCaptureResult {
+  capturedAt: string
+  app: ComputerAppIdentity
+  window: NativeCapturableWindowIdentity
+  artifact: {
+    format: 'png'
+    byteLength: number
+    sha256: string
+  }
+  /** Global Accessibility coordinates, measured in points. */
+  pointFrame: ComputerFrame
+  pixelWidth: number
+  pixelHeight: number
+  scaleX: number
+  scaleY: number
+  quality: NativeCaptureQuality
+  /** Number-to-ref/index mapping for the visible Set-of-Mark overlay. */
+  marks: NativeCaptureMark[]
+  omitted: NativeCaptureOmission[]
+}
+
 export interface NativeExpectedTarget {
   app: ComputerAppIdentity
   window: ComputerWindowIdentity
   element: NativeElementIdentity
   locator: number[]
+}
+
+/** Host-minted, single-request grant. Never accepted from tool arguments. */
+export interface NativeApprovalGrant {
+  outcome: 'allowed-once'
+  observationId: string
+  refDigest: string
+  riskCode: 'dangerous-click' | 'commit-key' | 'unsafe-key-chord'
+  observationFingerprint: string
+  actionDigest: string
+  nonce: string
 }
 
 export type NativeActionPayload =
@@ -59,6 +140,42 @@ export interface NativeActionResult {
   } | null
 }
 
+export type NativeHelperResolutionSource =
+  | 'explicit-override'
+  | 'installed-app'
+  | 'worktree-build'
+  | 'cache-build'
+
+export interface NativeHelperBundleIdentity {
+  path: string | null
+  identifier: string | null
+  version: string | null
+}
+
+export interface NativeHelperSigningMetadata {
+  signed: boolean
+  kind: 'development' | 'developer-id' | 'distribution' | 'other' | 'adhoc' | 'unsigned'
+  codeIdentifier: string | null
+  teamIdentifier: string | null
+  authorities: string[]
+  cdhash: string | null
+  statusCode: number
+  detail: string | null
+}
+
+export interface NativeHelperProcessIdentity {
+  pid: number
+  ppid: number
+}
+
+/** Immediate process that launched the short-lived Helper (normally DSH's Node host). */
+export interface NativeHelperCallerContext {
+  pid: number
+  executable: string | null
+  bundleIdentifier: string | null
+  name: string | null
+}
+
 export type NativeRequest =
   | {
       id: string
@@ -77,18 +194,40 @@ export type NativeRequest =
       command: 'act'
       expected: NativeExpectedTarget
       action: NativeActionPayload
+      approval: NativeApprovalGrant | null
+    }
+  | {
+      id: string
+      command: 'capture'
+      capture: NativeCaptureInput
     }
 
 export interface NativeStatusResult {
   platform: 'macos'
   accessibilityTrusted: boolean
+  screenRecordingTrusted: boolean
+  /** Positive evidence that the console session is locked or inactive. */
+  sessionLocked: boolean
+  /** False for a known lock and for indeterminate/non-console session state. */
+  interactiveSessionAvailable: boolean
   helperVersion: string
+  helperExecutable: string
+  bundle: NativeHelperBundleIdentity
+  signing: NativeHelperSigningMetadata
+  process: NativeHelperProcessIdentity
+  caller: NativeHelperCallerContext
+  resolution: {
+    source: NativeHelperResolutionSource
+    selectedPath: string
+  }
+  /** True only when the resolver validated the fixed app path, owner, bundle id, and non-ad-hoc signature. */
+  identityStable: boolean
 }
 
 export interface NativeResponse {
   id: string
   ok: boolean
-  result?: NativeStatusResult | NativeObserveResult | NativeActionResult
+  result?: NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult
   error?: {
     code: string
     message: string
@@ -96,7 +235,7 @@ export interface NativeResponse {
 }
 
 export interface NativeTransport {
-  request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult>(
+  request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult>(
     request: NativeRequest,
     options: { scopeId: string; signal?: AbortSignal },
   ): Promise<T>

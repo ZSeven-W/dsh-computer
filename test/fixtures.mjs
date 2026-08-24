@@ -43,6 +43,38 @@ export function observation(overrides = {}) {
   }
 }
 
+export function nativeStatus(overrides = {}) {
+  return {
+    platform: 'macos',
+    accessibilityTrusted: true,
+    screenRecordingTrusted: true,
+    sessionLocked: false,
+    interactiveSessionAvailable: true,
+    helperVersion: 'fixture',
+    helperExecutable: '/Applications/DSH Computer Helper.app/Contents/MacOS/DSH Computer Helper',
+    bundle: {
+      path: '/Applications/DSH Computer Helper.app',
+      identifier: 'io.github.zseven-w.dsh-computer.helper',
+      version: '0.1.0-rc.1',
+    },
+    signing: {
+      signed: true,
+      kind: 'development',
+      codeIdentifier: 'io.github.zseven-w.dsh-computer.helper',
+      teamIdentifier: 'FIXTURETEAM',
+      authorities: ['Apple Development: Fixture'],
+      cdhash: 'abcd',
+      statusCode: 0,
+      detail: null,
+    },
+    process: { pid: 9001, ppid: 9000 },
+    caller: { pid: 9000, executable: '/usr/local/bin/node', bundleIdentifier: null, name: 'node' },
+    resolution: { source: 'installed-app', selectedPath: '/Applications/DSH Computer Helper.app' },
+    identityStable: true,
+    ...overrides,
+  }
+}
+
 export class FakeNative {
   constructor(options = {}) {
     this.options = options
@@ -54,7 +86,7 @@ export class FakeNative {
   async request(request, options) {
     this.requests.push({ request: structuredClone(request), scopeId: options.scopeId })
     if (request.command === 'status') {
-      return { platform: 'macos', accessibilityTrusted: true, helperVersion: 'fixture' }
+      return this.options.status ?? nativeStatus()
     }
     if (request.command === 'observe') return this.options.observation ?? observation()
     if (this.options.actionError) throw this.options.actionError

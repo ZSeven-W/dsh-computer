@@ -1,7 +1,10 @@
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import ComputerCore
+import CoreGraphics
+import Darwin
 import Foundation
+import Security
 
 private let helperVersion = "0.1.0-rc.1"
 private let maxAttributeText = 240
@@ -24,7 +27,21 @@ private struct ExpectedTarget: Codable {
     let locator: [Int]
 }
 
-private struct Request: Codable {
+private struct CaptureTargetPayload: Codable {
+    let ref: String
+    let index: Int
+    let element: ElementIdentity
+    let locator: [Int]
+}
+
+private struct CapturePayload: Codable {
+    let app: AppIdentity
+    let window: WindowIdentity
+    let targets: [CaptureTargetPayload]
+    let outputPath: String
+}
+
+private struct Request: Decodable {
     let id: String
     let command: String
     let app: AppSelector?
@@ -33,6 +50,8 @@ private struct Request: Codable {
     let maxNodes: Int?
     let expected: ExpectedTarget?
     let action: ActionPayload?
+    let approval: HostApprovalGrant?
+    let capture: CapturePayload?
 }
 
 private struct ErrorPayload: Codable {
@@ -49,10 +68,98 @@ private struct Response<Result: Codable>: Codable {
 
 private struct EmptyResult: Codable {}
 
+private struct HelperBundleIdentity: Codable {
+    let path: String?
+    let identifier: String?
+    let version: String?
+
+    private enum CodingKeys: String, CodingKey { case path, identifier, version }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(path, forKey: .path)
+        try container.encode(identifier, forKey: .identifier)
+        try container.encode(version, forKey: .version)
+    }
+}
+
+private struct HelperSigningMetadata: Codable {
+    let signed: Bool
+    let kind: String
+    let codeIdentifier: String?
+    let teamIdentifier: String?
+    let authorities: [String]
+    let cdhash: String?
+    let statusCode: Int32
+    let detail: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case signed, kind, codeIdentifier, teamIdentifier, authorities, cdhash, statusCode, detail
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(signed, forKey: .signed)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(codeIdentifier, forKey: .codeIdentifier)
+        try container.encode(teamIdentifier, forKey: .teamIdentifier)
+        try container.encode(authorities, forKey: .authorities)
+        try container.encode(cdhash, forKey: .cdhash)
+        try container.encode(statusCode, forKey: .statusCode)
+        try container.encode(detail, forKey: .detail)
+    }
+}
+
+private struct HelperProcessIdentity: Codable {
+    let pid: Int32
+    let ppid: Int32
+}
+
+private struct HelperCallerContext: Codable {
+    let pid: Int32
+    let executable: String?
+    let bundleIdentifier: String?
+    let name: String?
+
+    private enum CodingKeys: String, CodingKey { case pid, executable, bundleIdentifier, name }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(pid, forKey: .pid)
+        try container.encode(executable, forKey: .executable)
+        try container.encode(bundleIdentifier, forKey: .bundleIdentifier)
+        try container.encode(name, forKey: .name)
+    }
+}
+
+private struct HelperResolutionIdentity: Codable {
+    let source: String
+    let selectedPath: String
+}
+
 private struct StatusResult: Codable {
     let platform: String
     let accessibilityTrusted: Bool
+    let screenRecordingTrusted: Bool
+    let sessionLocked: Bool
+    let interactiveSessionAvailable: Bool
     let helperVersion: String
+    let helperExecutable: String
+    let bundle: HelperBundleIdentity
+    let signing: HelperSigningMetadata
+    let process: HelperProcessIdentity
+    let caller: HelperCallerContext
+    let resolution: HelperResolutionIdentity
+    let identityStable: Bool
+}
+
+private struct RawSigningIdentity {
+    let signed: Bool
+    let codeIdentifier: String?
+    let teamIdentifier: String?
+    let authorities: [String]
+    let cdhash: String?
+    let status: OSStatus
 }
 
 private struct ObservedNode: Codable {
@@ -76,6 +183,26 @@ private struct ObservedNode: Codable {
             actions: actions, value: value
         )
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case role, subrole, name, identifier, frame, enabled, focused, secure, actions, value, locator, depth
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        try container.encode(subrole, forKey: .subrole)
+        try container.encode(name, forKey: .name)
+        try container.encode(identifier, forKey: .identifier)
+        try container.encode(frame, forKey: .frame)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(focused, forKey: .focused)
+        try container.encode(secure, forKey: .secure)
+        try container.encode(actions, forKey: .actions)
+        try container.encode(value, forKey: .value)
+        try container.encode(locator, forKey: .locator)
+        try container.encode(depth, forKey: .depth)
+    }
 }
 
 private struct ObserveResult: Codable {
@@ -86,11 +213,44 @@ private struct ObserveResult: Codable {
     let truncated: Bool
 }
 
+private struct CaptureOmission: Codable {
+    let ref: String
+    let index: Int
+    let reason: String
+}
+
+private struct CaptureResult: Codable {
+    let capturedAt: String
+    let app: AppIdentity
+    let window: WindowIdentity
+    let artifact: VisualCaptureArtifact
+    let pointFrame: ComputerFrame
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let scaleX: Double
+    let scaleY: Double
+    let quality: VisualCaptureQuality
+    let marks: [VisualCaptureMark]
+    let omitted: [CaptureOmission]
+}
+
 private struct PostObservation: Codable {
     let capturedAt: String
     let app: AppIdentity
     let window: WindowIdentity
     let target: ElementIdentity?
+
+    private enum CodingKeys: String, CodingKey {
+        case capturedAt, app, window, target
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(capturedAt, forKey: .capturedAt)
+        try container.encode(app, forKey: .app)
+        try container.encode(window, forKey: .window)
+        try container.encode(target, forKey: .target)
+    }
 }
 
 private struct ActionResult: Codable {
@@ -98,6 +258,18 @@ private struct ActionResult: Codable {
     let reason: String
     let accepted: Bool
     let post: PostObservation?
+
+    private enum CodingKeys: String, CodingKey {
+        case status, reason, accepted, post
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(status, forKey: .status)
+        try container.encode(reason, forKey: .reason)
+        try container.encode(accepted, forKey: .accepted)
+        try container.encode(post, forKey: .post)
+    }
 }
 
 private struct HelperFailure: Error {
@@ -111,6 +283,207 @@ private struct ResolvedTarget {
     let appElement: AXUIElement
     let windowElement: AXUIElement
     let windowIdentity: WindowIdentity
+}
+
+private func cgSessionBoolean(_ dictionary: NSDictionary?, key: String) -> Bool? {
+    guard let value = dictionary?[key] else { return nil }
+    if let boolean = value as? Bool { return boolean }
+    if let number = value as? NSNumber { return number.boolValue }
+    return nil
+}
+
+private func currentInteractiveSessionAvailability() -> InteractiveSessionAvailability {
+    let dictionary = CGSessionCopyCurrentDictionary() as NSDictionary?
+    let signals = InteractiveSessionSignals(
+        frontmostBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+        loginDone: cgSessionBoolean(dictionary, key: kCGSessionLoginDoneKey),
+        onConsole: cgSessionBoolean(dictionary, key: kCGSessionOnConsoleKey),
+        // This WindowServer session key is present on supported macOS releases
+        // but is not exported as a CoreGraphics Swift constant.
+        screenLocked: cgSessionBoolean(dictionary, key: "CGSSessionScreenIsLocked")
+    )
+    return InteractiveSessionPolicy.evaluate(signals)
+}
+
+private func requireInteractiveSession() throws {
+    guard currentInteractiveSessionAvailability().interactiveSessionAvailable else {
+        throw HelperFailure(
+            code: "session_locked",
+            message: "macOS interactive desktop session is locked or unavailable"
+        )
+    }
+}
+
+private func accessibilityTrustedWithoutPrompt() -> Bool {
+    let promptOption = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    return AXIsProcessTrustedWithOptions([promptOption: false] as CFDictionary)
+}
+
+private func canonicalPath(_ path: String) -> String {
+    path.withCString { source in
+        guard let resolved = realpath(source, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+}
+
+private func processExecutablePath(pid: pid_t) -> String? {
+    // PROC_PIDPATHINFO_MAXSIZE is a C expression macro and is not imported by Swift.
+    var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+    let count = buffer.withUnsafeMutableBytes { bytes in
+        proc_pidpath(pid, bytes.baseAddress, UInt32(bytes.count))
+    }
+    guard count > 0 else { return nil }
+    return buffer.withUnsafeBufferPointer { pointer in
+        guard let baseAddress = pointer.baseAddress else { return nil }
+        return canonicalPath(String(cString: baseAddress))
+    }
+}
+
+private func helperExecutablePath() -> String {
+    if let executable = processExecutablePath(pid: getpid()) { return executable }
+    if let executable = Bundle.main.executableURL?.resolvingSymlinksInPath().path { return executable }
+    return canonicalPath(URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path)
+}
+
+private func enclosingApplicationBundle(for executablePath: String?) -> Bundle? {
+    guard let executablePath else { return nil }
+    var url = URL(fileURLWithPath: executablePath).deletingLastPathComponent()
+    while url.path != "/" {
+        if url.pathExtension.lowercased() == "app", let bundle = Bundle(url: url) { return bundle }
+        url.deleteLastPathComponent()
+    }
+    return nil
+}
+
+private func certificateAuthority(_ certificate: SecCertificate) -> String? {
+    var commonName: CFString?
+    guard SecCertificateCopyCommonName(certificate, &commonName) == errSecSuccess,
+          let commonName else { return nil }
+    return commonName as String
+}
+
+private func hexadecimal(_ data: Data) -> String {
+    data.map { String(format: "%02x", $0) }.joined()
+}
+
+private func rawSigningIdentity() -> RawSigningIdentity {
+    var code: SecCode?
+    let defaultFlags = SecCSFlags(rawValue: 0)
+    let copySelfStatus = SecCodeCopySelf(defaultFlags, &code)
+    guard copySelfStatus == errSecSuccess, let code else {
+        return RawSigningIdentity(
+            signed: false, codeIdentifier: nil, teamIdentifier: nil,
+            authorities: [], cdhash: nil, status: copySelfStatus
+        )
+    }
+
+    // Swift imports SecCode and SecStaticCode as distinct types. Convert through
+    // the public API rather than relying on their underlying CoreFoundation shape.
+    var staticCode: SecStaticCode?
+    let copyStaticStatus = SecCodeCopyStaticCode(code, defaultFlags, &staticCode)
+    guard copyStaticStatus == errSecSuccess, let staticCode else {
+        return RawSigningIdentity(
+            signed: false, codeIdentifier: nil, teamIdentifier: nil,
+            authorities: [], cdhash: nil, status: copyStaticStatus
+        )
+    }
+
+    var rawInformation: CFDictionary?
+    let signingFlags = SecCSFlags(rawValue: kSecCSSigningInformation)
+    let copyInfoStatus = SecCodeCopySigningInformation(staticCode, signingFlags, &rawInformation)
+    guard copyInfoStatus == errSecSuccess, let rawInformation else {
+        return RawSigningIdentity(
+            signed: false, codeIdentifier: nil, teamIdentifier: nil,
+            authorities: [], cdhash: nil, status: copyInfoStatus
+        )
+    }
+
+    let information = rawInformation as NSDictionary
+    let identifier = information[kSecCodeInfoIdentifier] as? String
+    let teamIdentifier = information[kSecCodeInfoTeamIdentifier] as? String
+    let certificates = information[kSecCodeInfoCertificates] as? [SecCertificate] ?? []
+    return RawSigningIdentity(
+        signed: identifier != nil,
+        codeIdentifier: identifier,
+        teamIdentifier: teamIdentifier,
+        authorities: certificates.compactMap(certificateAuthority),
+        cdhash: (information[kSecCodeInfoUnique] as? Data).map(hexadecimal),
+        status: copyInfoStatus
+    )
+}
+
+private func signingKind(_ signing: RawSigningIdentity) -> String {
+    guard signing.signed else { return "unsigned" }
+    guard signing.teamIdentifier != nil else { return "adhoc" }
+    let leaf = signing.authorities.first?.lowercased() ?? ""
+    if leaf.contains("developer id application") { return "developer-id" }
+    if leaf.contains("apple development") { return "development" }
+    if leaf.contains("apple distribution") || leaf.contains("mac app distribution") { return "distribution" }
+    return "other"
+}
+
+private func signingDetail(_ status: OSStatus) -> String? {
+    guard status != errSecSuccess else { return nil }
+    return SecCopyErrorMessageString(status, nil) as String?
+}
+
+private func makeStatus() -> StatusResult {
+    let session = currentInteractiveSessionAvailability()
+    let executable = helperExecutablePath()
+    let applicationBundle = enclosingApplicationBundle(for: executable)
+    let parentPID = getppid()
+    let parentExecutable = processExecutablePath(pid: parentPID)
+    let runningParent = NSRunningApplication(processIdentifier: parentPID)
+    let parentBundle = runningParent?.bundleURL.flatMap(Bundle.init(url:))
+        ?? enclosingApplicationBundle(for: parentExecutable)
+    let signing = rawSigningIdentity()
+    let shortVersion = applicationBundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    let buildVersion = applicationBundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+    return StatusResult(
+        platform: "macos",
+        accessibilityTrusted: accessibilityTrustedWithoutPrompt(),
+        screenRecordingTrusted: CGPreflightScreenCaptureAccess(),
+        sessionLocked: session.sessionLocked,
+        interactiveSessionAvailable: session.interactiveSessionAvailable,
+        helperVersion: helperVersion,
+        helperExecutable: executable,
+        bundle: HelperBundleIdentity(
+            path: applicationBundle.map { canonicalPath($0.bundlePath) },
+            identifier: applicationBundle?.bundleIdentifier,
+            version: shortVersion ?? buildVersion
+        ),
+        signing: HelperSigningMetadata(
+            signed: signing.signed,
+            kind: signingKind(signing),
+            codeIdentifier: signing.codeIdentifier,
+            teamIdentifier: signing.teamIdentifier,
+            authorities: signing.authorities,
+            cdhash: signing.cdhash,
+            statusCode: signing.status,
+            detail: signingDetail(signing.status)
+        ),
+        process: HelperProcessIdentity(pid: getpid(), ppid: parentPID),
+        caller: HelperCallerContext(
+            pid: parentPID,
+            executable: parentExecutable,
+            bundleIdentifier: runningParent?.bundleIdentifier ?? parentBundle?.bundleIdentifier,
+            name: runningParent?.localizedName
+                ?? parentBundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                ?? parentBundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
+                ?? parentExecutable.map { URL(fileURLWithPath: $0).lastPathComponent }
+        ),
+        // The native process can report facts about itself, but only the Node
+        // resolver can attest how it was selected. NativeHelper overwrites these.
+        resolution: HelperResolutionIdentity(source: "cache-build", selectedPath: executable),
+        identityStable: false
+    )
+}
+
+private func accessibilityPermissionMessage() -> String {
+    "Accessibility permission is not granted for DSH Computer Helper (\(helperExecutablePath())); "
+        + "enable that exact Helper in System Settings > Privacy & Security > Accessibility"
 }
 
 private func timestamp() -> String {
@@ -134,6 +507,17 @@ private func attribute(_ element: AXUIElement, _ name: CFString) -> CFTypeRef? {
 
 private func stringAttribute(_ element: AXUIElement, _ name: CFString) -> String? {
     bounded(attribute(element, name) as? String)
+}
+
+/// AXValue is not uniformly textual: checkboxes, radio buttons, sliders and
+/// several native controls expose NSNumber. Normalize those scalar values to a
+/// bounded string so action receipts can prove real state transitions without
+/// widening the public JSON contract to arbitrary CoreFoundation values.
+private func scalarValueAttribute(_ element: AXUIElement, _ name: CFString) -> String? {
+    guard let value = attribute(element, name) else { return nil }
+    if let string = value as? String { return bounded(string) }
+    if let number = value as? NSNumber { return bounded(number.stringValue) }
+    return nil
 }
 
 private func boolAttribute(_ element: AXUIElement, _ name: CFString) -> Bool? {
@@ -209,7 +593,7 @@ private func identityOf(_ element: AXUIElement) -> ElementIdentity {
     let title = stringAttribute(element, kAXTitleAttribute as CFString)
     let description = stringAttribute(element, kAXDescriptionAttribute as CFString)
     let help = stringAttribute(element, kAXHelpAttribute as CFString)
-    let value = secure ? nil : stringAttribute(element, kAXValueAttribute as CFString)
+    let value = secure ? nil : scalarValueAttribute(element, kAXValueAttribute as CFString)
     return ElementIdentity(
         role: role,
         subrole: subrole,
@@ -280,12 +664,65 @@ private func resolveApplication(_ selector: AppSelector?) throws -> NSRunningApp
     return frontmost
 }
 
+private func coreGraphicsWindowCandidates(ownerPID: pid_t) -> [WindowMetadataCandidate] {
+    guard ownerPID > 0,
+          let records = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
+        return []
+    }
+    return records.compactMap { record in
+        guard let numberValue = record[kCGWindowNumber as String] as? NSNumber,
+              let ownerValue = record[kCGWindowOwnerPID as String] as? NSNumber,
+              ownerValue.int32Value == ownerPID,
+              let layerValue = record[kCGWindowLayer as String] as? NSNumber,
+              layerValue.intValue == Int(CGWindowLevelForKey(.normalWindow)),
+              let boundsDictionary = record[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
+              bounds.origin.x.isFinite,
+              bounds.origin.y.isFinite,
+              bounds.width.isFinite,
+              bounds.height.isFinite,
+              bounds.width > 0,
+              bounds.height > 0 else { return nil }
+        return WindowMetadataCandidate(
+            number: numberValue.intValue,
+            ownerPID: ownerValue.int32Value,
+            layer: layerValue.intValue,
+            frame: ComputerFrame(
+                x: bounds.origin.x,
+                y: bounds.origin.y,
+                width: bounds.width,
+                height: bounds.height
+            ),
+            title: bounded(record[kCGWindowName as String] as? String)
+        )
+    }
+}
+
+private func inferredWindowNumber(
+    _ window: AXUIElement,
+    frame: ComputerFrame?,
+    title: String?
+) -> Int? {
+    var ownerPID: pid_t = 0
+    guard AXUIElementGetPid(window, &ownerPID) == .success, ownerPID > 0 else { return nil }
+    // CGWindowListCopyWindowInfo is a metadata-only query. It neither captures
+    // pixels nor invokes CGRequestScreenCaptureAccess, so this fallback cannot
+    // prompt for Screen Recording permission.
+    return WindowNumberMatcher.uniqueWindowNumber(
+        ownerPID: ownerPID,
+        accessibilityFrame: frame,
+        accessibilityTitle: title,
+        candidates: coreGraphicsWindowCandidates(ownerPID: ownerPID)
+    )
+}
+
 private func windowIdentity(_ window: AXUIElement) -> WindowIdentity {
-    let number = intAttribute(window, "AXWindowNumber" as CFString)
+    let explicitNumber = intAttribute(window, "AXWindowNumber" as CFString)
     let role = stringAttribute(window, kAXRoleAttribute as CFString) ?? "AXWindow"
     let subrole = stringAttribute(window, kAXSubroleAttribute as CFString)
     let title = stringAttribute(window, kAXTitleAttribute as CFString)
     let frame = frameOf(window)
+    let number = explicitNumber ?? inferredWindowNumber(window, frame: frame, title: title)
     let frameText = frame.map { "\($0.x),\($0.y),\($0.width),\($0.height)" } ?? "nil"
     let digest = stableDigest([number.map(String.init) ?? "nil", role, subrole ?? "", title ?? "", frameText])
     return WindowIdentity(number: number, role: role, subrole: subrole, title: title, frame: frame, identity: digest)
@@ -336,10 +773,11 @@ private func resolveExpectedWindow(app: AXUIElement, expected: WindowIdentity) t
 }
 
 private func resolveTarget(selector: AppSelector?, windowSelector: WindowSelector?) throws -> ResolvedTarget {
+    try requireInteractiveSession()
     guard AXIsProcessTrusted() else {
         throw HelperFailure(
             code: "accessibility_permission_required",
-            message: "Accessibility permission is not granted; enable the DSH host in System Settings > Privacy & Security > Accessibility"
+            message: accessibilityPermissionMessage()
         )
     }
     let running = try resolveApplication(selector)
@@ -380,9 +818,131 @@ private func observe(_ request: Request) throws -> ObserveResult {
         }
     }
     if index < queue.count { truncated = true }
+    // Do not return an Accessibility snapshot if the desktop locked while the
+    // bounded traversal was in flight.
+    try requireInteractiveSession()
     return ObserveResult(
         capturedAt: timestamp(), app: resolved.appIdentity, window: resolved.windowIdentity,
         nodes: nodes, truncated: truncated
+    )
+}
+
+private func capture(_ request: Request) throws -> CaptureResult {
+    try requireInteractiveSession()
+    guard let payload = request.capture else {
+        throw HelperFailure(code: "invalid_capture", message: "capture payload is required")
+    }
+    guard AXIsProcessTrusted() else {
+        throw HelperFailure(code: "accessibility_permission_required", message: accessibilityPermissionMessage())
+    }
+    guard payload.targets.count <= 200 else {
+        throw HelperFailure(code: "invalid_capture", message: "capture accepts at most 200 Accessibility targets")
+    }
+    guard let explicitWindowNumber = payload.window.number, explicitWindowNumber > 0,
+          payload.window.frame != nil else {
+        throw HelperFailure(
+            code: "window_number_required",
+            message: "window capture requires an observed window with an explicit number and point frame"
+        )
+    }
+    guard payload.app.launchIdentity != nil,
+          let running = NSRunningApplication(processIdentifier: payload.app.pid),
+          !running.isTerminated else {
+        throw HelperFailure(code: "stale_application", message: "observed application process is no longer running")
+    }
+    let liveApp = try appIdentity(running)
+    if case let .stale(reason) = IdentityVerifier.app(expected: payload.app, live: liveApp) {
+        throw HelperFailure(code: "stale_application", message: reason)
+    }
+    let appElement = AXUIElementCreateApplication(running.processIdentifier)
+    let liveWindowElement = try resolveExpectedWindow(app: appElement, expected: payload.window)
+    let liveWindow = windowIdentity(liveWindowElement)
+    if case let .stale(reason) = IdentityVerifier.window(expected: payload.window, live: liveWindow) {
+        throw HelperFailure(code: "stale_window", message: reason)
+    }
+    guard liveWindow.number == explicitWindowNumber, let livePointFrame = liveWindow.frame else {
+        throw HelperFailure(code: "stale_window", message: "live Accessibility window lost its explicit number or point frame")
+    }
+
+    var refs = Set<String>()
+    var indices = Set<Int>()
+    for target in payload.targets {
+        guard !target.ref.isEmpty, target.ref.utf8.count <= 256,
+              target.index >= 0, target.index < 500,
+              target.locator.count <= 8,
+              target.locator.allSatisfy({ $0 >= 0 && $0 < maxChildrenPerNode }),
+              refs.insert(target.ref).inserted,
+              indices.insert(target.index).inserted else {
+            throw HelperFailure(
+                code: "invalid_capture_targets",
+                message: "capture target refs/indices must be unique and locators must stay inside observation bounds"
+            )
+        }
+    }
+
+    var liveTargets: [VisualCaptureTarget] = []
+    var omitted: [CaptureOmission] = []
+    liveTargets.reserveCapacity(payload.targets.count)
+    omitted.reserveCapacity(payload.targets.count)
+    for target in payload.targets {
+        do {
+            let element = try locate(window: liveWindowElement, locator: target.locator)
+            let liveElement = identityOf(element)
+            if case let .stale(reason) = IdentityVerifier.element(expected: target.element, live: liveElement) {
+                omitted.append(CaptureOmission(ref: target.ref, index: target.index, reason: "stale_target: \(reason)"))
+                continue
+            }
+            guard let frame = liveElement.frame else {
+                omitted.append(CaptureOmission(ref: target.ref, index: target.index, reason: "target_has_no_frame"))
+                continue
+            }
+            liveTargets.append(VisualCaptureTarget(ref: target.ref, index: target.index, globalFrame: frame))
+        } catch let failure as HelperFailure {
+            omitted.append(CaptureOmission(
+                ref: target.ref,
+                index: target.index,
+                reason: "\(failure.code): \(failure.message)"
+            ))
+        }
+    }
+
+    // Re-check after AX resolution and immediately before the CG capture. A
+    // lock transition must not fall through to a background-window screenshot.
+    try requireInteractiveSession()
+    let output = try WindowCaptureEngine.capture(
+        windowNumber: explicitWindowNumber,
+        ownerPID: liveApp.pid,
+        expectedPointFrame: livePointFrame,
+        targets: liveTargets,
+        outputPath: payload.outputPath
+    )
+    do {
+        try requireInteractiveSession()
+    } catch {
+        try? FileManager.default.removeItem(atPath: payload.outputPath)
+        throw error
+    }
+    let markedRefs = Set(output.marks.map(\.ref))
+    for target in liveTargets where !markedRefs.contains(target.ref) {
+        omitted.append(CaptureOmission(
+            ref: target.ref,
+            index: target.index,
+            reason: "target_outside_captured_window"
+        ))
+    }
+    return CaptureResult(
+        capturedAt: timestamp(),
+        app: liveApp,
+        window: liveWindow,
+        artifact: output.artifact,
+        pointFrame: output.pointFrame,
+        pixelWidth: output.pixelWidth,
+        pixelHeight: output.pixelHeight,
+        scaleX: output.scaleX,
+        scaleY: output.scaleY,
+        quality: output.quality,
+        marks: output.marks,
+        omitted: omitted
     )
 }
 
@@ -399,8 +959,9 @@ private func locate(window: AXUIElement, locator: [Int]) throws -> AXUIElement {
 }
 
 private func preflight(_ expected: ExpectedTarget) throws -> (ResolvedTarget, AXUIElement, ElementIdentity) {
+    try requireInteractiveSession()
     guard AXIsProcessTrusted() else {
-        throw HelperFailure(code: "accessibility_permission_required", message: "Accessibility permission is not granted")
+        throw HelperFailure(code: "accessibility_permission_required", message: accessibilityPermissionMessage())
     }
     guard let running = NSRunningApplication(processIdentifier: expected.app.pid), !running.isTerminated else {
         throw HelperFailure(code: "stale_application", message: "observed application process is no longer running")
@@ -482,6 +1043,7 @@ private func isSettable(_ element: AXUIElement, _ attribute: CFString) -> Bool {
 }
 
 private func tryPost(expected: ExpectedTarget) -> PostObservation? {
+    guard currentInteractiveSessionAvailability().interactiveSessionAvailable else { return nil }
     guard let running = NSRunningApplication(processIdentifier: expected.app.pid), !running.isTerminated,
           let liveApp = try? appIdentity(running) else { return nil }
     let app = AXUIElementCreateApplication(running.processIdentifier)
@@ -507,6 +1069,7 @@ private func unknownAfterMutation(expected: ExpectedTarget, reason: String) -> A
 
 private func preflightFailureStatus(_ failure: HelperFailure) -> String {
     if failure.code.hasPrefix("stale_") || failure.code == "accessibility_permission_required"
+        || failure.code == "session_locked"
         || failure.code == "unsupported_key" || failure.code == "invalid_modifier"
         || failure.code == "focus_not_supported" || failure.code == "value_not_settable"
         || failure.code == "invalid_action" {
@@ -522,7 +1085,7 @@ private func actionResult(_ request: Request) -> ActionResult {
     var mutationStarted = false
     do {
         let (resolved, element, before) = try preflight(expected)
-        if let rejection = RiskPolicy.rejection(action: action, target: before) {
+        if let rejection = RiskPolicy.rejection(action: action, target: before, approval: request.approval) {
             return ActionResult(status: "rejected", reason: rejection, accepted: false, post: nil)
         }
         // Validate every fallible prerequisite before the first AX/CG mutation.
@@ -562,6 +1125,10 @@ private func actionResult(_ request: Request) -> ActionResult {
             throw HelperFailure(code: "invalid_action", message: "unsupported action: \(action.kind)")
         }
 
+        // This is intentionally after all fallible validation but before the
+        // first AX/CG mutation, narrowing the lock-transition race window.
+        try requireInteractiveSession()
+
         switch action.kind {
         case "click":
             mutationStarted = true
@@ -590,6 +1157,10 @@ private func actionResult(_ request: Request) -> ActionResult {
                     reason: "focus mutation began before typing but returned code \(focusCode.rawValue); final state is unknown"
                 )
             }
+            // Focus is itself a mutation. If the session locks before the text
+            // write, stop here and let the existing mutationStarted catch path
+            // report an accepted-but-unknown outcome without exposing content.
+            try requireInteractiveSession()
             let valueCode = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, action.text! as CFString)
             guard valueCode == .success else {
                 return unknownAfterMutation(
@@ -611,6 +1182,10 @@ private func actionResult(_ request: Request) -> ActionResult {
             guard let preparedKey else {
                 throw HelperFailure(code: "key_event_failed", message: "prepared key event disappeared")
             }
+            // Re-check after an optional focus mutation and immediately before
+            // dispatch. If focus already changed, a lock transition is reported
+            // as unknown and no key event is posted.
+            try requireInteractiveSession()
             mutationStarted = true
             preparedKey.down.postToPid(resolved.appIdentity.pid)
             preparedKey.up.postToPid(resolved.appIdentity.pid)
@@ -686,7 +1261,7 @@ private func handle(_ line: String) {
     } catch {
         emit(Response<EmptyResult>(
             id: "unknown", ok: false, result: nil,
-            error: ErrorPayload(code: "invalid_request", message: "request is not valid JSON: \(error)")
+            error: ErrorPayload(code: "invalid_request", message: "request is not valid for the native protocol")
         ))
         return
     }
@@ -695,7 +1270,7 @@ private func handle(_ line: String) {
     case "status":
         emit(Response(
             id: request.id, ok: true,
-            result: StatusResult(platform: "macos", accessibilityTrusted: AXIsProcessTrusted(), helperVersion: helperVersion), error: nil
+            result: makeStatus(), error: nil
         ))
     case "observe":
         do {
@@ -709,6 +1284,25 @@ private func handle(_ line: String) {
             emit(Response<ObserveResult>(
                 id: request.id, ok: false, result: nil,
                 error: ErrorPayload(code: "observe_failed", message: String(describing: error))
+            ))
+        }
+    case "capture":
+        do {
+            emit(Response(id: request.id, ok: true, result: try capture(request), error: nil))
+        } catch let failure as HelperFailure {
+            emit(Response<CaptureResult>(
+                id: request.id, ok: false, result: nil,
+                error: ErrorPayload(code: failure.code, message: failure.message)
+            ))
+        } catch let failure as VisualCaptureFailure {
+            emit(Response<CaptureResult>(
+                id: request.id, ok: false, result: nil,
+                error: ErrorPayload(code: failure.code, message: failure.message)
+            ))
+        } catch {
+            emit(Response<CaptureResult>(
+                id: request.id, ok: false, result: nil,
+                error: ErrorPayload(code: "capture_failed", message: String(describing: error))
             ))
         }
     case "act":
