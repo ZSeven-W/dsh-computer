@@ -45,6 +45,8 @@
     "native/Sources",
     "native/Tests",
     "scripts/install-local-helper.mjs",
+    "scripts/release",
+    "RELEASE.md",
     "cordis.patch.yml",
     "README.md",
     "README.*.md",
@@ -60,7 +62,11 @@
     "test": "npm run test:node && npm run test:swift && npm run test:native-protocol",
     "prepack": "npm run build && npm test",
     "prepublishOnly": "npm run smoke:pack",
-    "smoke:pack": "node scripts/smoke-pack.mjs"
+    "smoke:pack": "node scripts/smoke-pack.mjs",
+    "release": "node scripts/release/release.mjs",
+    "release:dry-run": "node scripts/release/release.mjs --dry-run",
+    "release:verify": "node scripts/release/verify-artifact.mjs",
+    "release:checksum": "node scripts/release/checksum.mjs"
   },
   "dsh": {
     "bundle": {

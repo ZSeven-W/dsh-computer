@@ -1,0 +1,13 @@
+# TEMPLATE - do not commit a real URL/checksum as if it were published.
+# The release pipeline replaces __VERSION__, __DMG_FILENAME__, and __SHA256__.
+cask "dsh-computer-helper" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/ZSeven-W/dsh-computer/releases/download/v__VERSION__/__DMG_FILENAME__"
+  name "DSH Computer Helper"
+  desc "Native macOS helper for DSH Computer"
+  homepage "https://github.com/ZSeven-W/dsh-computer"
+
+  app "DSH Computer Helper.app"
+end

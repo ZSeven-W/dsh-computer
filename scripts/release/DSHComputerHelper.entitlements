@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DSH Computer Helper release entitlements.
+
+  Accessibility (AXUIElement*) and Screen Recording (CGWindowListCreateImage)
+  are TCC permissions on macOS. They are granted to the exact code-signing
+  identity of this bundle, not through an entitlement key. Therefore this
+  release entitlements file intentionally contains no AX/screen-recording
+  entitlement.
+
+  Hardened Runtime is enabled by the pipeline's codesign --options runtime
+  flag. The keys below make the release hardening explicit:
+    com.apple.security.get-task-allow
+        Must be false in release builds so a debugger cannot attach via
+        task_for_pid. Development builds may use a separate ad-hoc/provisioned
+        profile; this file is only for Developer ID release signing.
+    com.apple.security.cs.allow-jit
+        Must be false because the helper is a native executable and does not
+        use a JIT. Keeping it false preserves Hardened Runtime protections.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.get-task-allow</key>
+    <false/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+</dict>
+</plist>
