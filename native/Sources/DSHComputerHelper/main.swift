@@ -7,6 +7,7 @@ import Foundation
 import Security
 
 private let helperVersion = "0.1.0-rc.1"
+private let helperBundleId = "io.github.zseven-w.dsh-computer.helper"
 private let maxAttributeText = 240
 private let maxChildrenPerNode = 80
 
@@ -438,8 +439,20 @@ private func makeStatus() -> StatusResult {
     let parentBundle = runningParent?.bundleURL.flatMap(Bundle.init(url:))
         ?? enclosingApplicationBundle(for: parentExecutable)
     let signing = rawSigningIdentity()
+    let signatureKind = signingKind(signing)
     let shortVersion = applicationBundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     let buildVersion = applicationBundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+    // identityStable is computed from the actual code signature, not from a
+    // build flag. A stable TCC identity requires a certificate-backed (non
+    // ad-hoc) signature with the fixed bundle identifier and a TeamIdentifier.
+    let stableBundleIdentity = applicationBundle?.bundleIdentifier == helperBundleId
+        && signing.signed
+        && signing.teamIdentifier != nil
+        && signing.codeIdentifier == helperBundleId
+        && signatureKind != "adhoc"
+        && signatureKind != "unsigned"
+        && signing.status == errSecSuccess
 
     return StatusResult(
         platform: "macos",
@@ -474,10 +487,12 @@ private func makeStatus() -> StatusResult {
                 ?? parentBundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
                 ?? parentExecutable.map { URL(fileURLWithPath: $0).lastPathComponent }
         ),
-        // The native process can report facts about itself, but only the Node
-        // resolver can attest how it was selected. NativeHelper overwrites these.
+        // The native process reports its own signature-derived identity here.
+        // The Node resolver additionally attests how the binary was selected and
+        // may overwrite identityStable for the fixed installed-app path after
+        // its own deep validation.
         resolution: HelperResolutionIdentity(source: "cache-build", selectedPath: executable),
-        identityStable: false
+        identityStable: stableBundleIdentity
     )
 }
 
