@@ -8,6 +8,7 @@ import type {
   ComputerObservation,
   ComputerObserveRequest,
   ComputerModifier,
+  ComputerScrollAmount,
 } from './contracts.js'
 import {
   commitVisualCapture,
@@ -159,7 +160,7 @@ const receiptSchema: JsonSchema = {
   properties: {
     receiptId: { type: 'string' }, sequence: { type: 'integer' },
     status: { type: 'string', enum: ['confirmed', 'unknown', 'rejected', 'failed'] },
-    action: { type: 'string', enum: ['click', 'focus', 'type', 'key'] }, ref: { type: 'string' },
+    action: { type: 'string', enum: ['click', 'focus', 'type', 'key', 'scroll'] }, ref: { type: 'string' },
     observationId: nullable({ type: 'string' }), observationFingerprint: nullable({ type: 'string' }),
     startedAt: { type: 'string' }, finishedAt: { type: 'string' }, reason: { type: 'string' },
     nativeAccepted: { type: 'boolean' }, postAction: postSchema,
@@ -172,7 +173,7 @@ const receiptSchema: JsonSchema = {
 const evidenceSchema: JsonSchema = {
   type: 'object', additionalProperties: false,
   properties: {
-    contractVersion: { type: 'integer', const: 2 }, scope: { type: 'string' },
+    contractVersion: { type: 'integer', const: 3 }, scope: { type: 'string' },
     status: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -446,7 +447,20 @@ function actionRequest(args: Record<string, unknown>): ComputerAction {
       ...(modifiers === undefined ? {} : { modifiers: modifiers as ComputerModifier[] }),
     }
   }
-  throw new Error('computer_act: action must be click, focus, type, or key')
+  if (kind === 'scroll') {
+    const direction = args.direction
+    if (direction !== 'up' && direction !== 'down') {
+      throw new Error('computer_act: direction is required for scroll and must be up or down')
+    }
+    const amount = args.amount
+    if (amount !== undefined && amount !== 'line' && amount !== 'page'
+      && (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0)) {
+      throw new Error('computer_act: amount must be line, page, or a positive number of points')
+    }
+    if (amount === undefined) return { kind, ref, direction }
+    return { kind, ref, direction, amount: amount as ComputerScrollAmount }
+  }
+  throw new Error('computer_act: action must be click, focus, type, key, or scroll')
 }
 
 export interface ComputerTools {
@@ -531,20 +545,24 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
 
   const computerAct: StructuralToolDefinition = {
     name: 'computer_act',
-    description: 'Perform one click, focus, type, or key operation using an opaque ref from computer_observe. The driver read-only re-observes '
+    description: 'Perform one click, focus, type, key, or scroll operation using an opaque ref from computer_observe. The driver read-only re-observes '
       + 'the live application, process launch, window and element before acting, and repeats that preflight after any approval. Secure text is '
       + 'permanently blocked. Destructive/financial/send/publish clicks, commit keys, and non-navigation key chords require host-owned approval '
-      + 'for exactly this action/ref/observation; the model cannot provide an approval or risk flag. Safe focus and allowlisted navigation do not prompt. '
+      + 'for exactly this action/ref/observation; the model cannot provide an approval or risk flag. Safe focus, allowlisted navigation, and scrolling do not prompt. '
+      + 'Scroll (action=scroll) scrolls the Accessibility scroll area that contains or is the referenced element, direction up/down with an optional '
+      + 'amount of line, page (default), or a positive point count. '
       + 'Inspect the returned receipt status: '
-      + 'unknown means the input was dispatched but the user-visible effect could not be proven.',
+      + 'unknown means the input was dispatched but the user-visible effect could not be proven — for scroll, re-observe to decide whether content moved.',
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
-        action: { type: 'string', enum: ['click', 'focus', 'type', 'key'] },
+        action: { type: 'string', enum: ['click', 'focus', 'type', 'key', 'scroll'] },
         ref: { type: 'string', description: 'Opaque, expiring ref returned by computer_observe.' },
         text: { type: 'string', description: 'Text for action=type; never use for credentials or secure fields.' },
         key: { type: 'string', description: 'Key name for action=key. Allowlisted navigation is immediate; commit and non-navigation keys require host approval.' },
         modifiers: { type: 'array', items: { type: 'string', enum: ['command', 'control', 'option', 'shift', 'fn'] } },
+        direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction for action=scroll.' },
+        amount: { description: 'Scroll amount for action=scroll: line, page (default), or a positive point count.', oneOf: [{ type: 'string', enum: ['line', 'page'] }, { type: 'number' }] },
       },
       required: ['action', 'ref'],
     },
@@ -552,7 +570,7 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
     timeoutMs: 30_000,
     async execute(value, exec): Promise<ComputerActionReceipt> {
       const args = record(value, 'computer_act')
-      assertOnlyKeys(args, ['action', 'ref', 'text', 'key', 'modifiers'], 'computer_act')
+      assertOnlyKeys(args, ['action', 'ref', 'text', 'key', 'modifiers', 'direction', 'amount'], 'computer_act')
       return driver.act(actionRequest(args), actionExecutionContext(exec, host))
     },
     presentCall: () => ({ card: 'generic', title: 'Act on macOS target', kind: 'execute' }),

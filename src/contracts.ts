@@ -1,7 +1,7 @@
 /** Stable service name exposed through Cordis for dsh-qa and other drivers. */
 export const COMPUTER_DRIVER_SERVICE = 'zsevenComputerDriver' as const
 
-export const COMPUTER_DRIVER_CONTRACT_VERSION = 2 as const
+export const COMPUTER_DRIVER_CONTRACT_VERSION = 3 as const
 
 export interface ComputerFrame {
   x: number
@@ -161,11 +161,25 @@ export interface ComputerVisualCapture {
 
 export type ComputerModifier = 'command' | 'control' | 'option' | 'shift' | 'fn'
 
+export type ComputerScrollDirection = 'up' | 'down'
+
+export type ComputerScrollAmount = 'line' | 'page' | number
+
+/**
+ * One bound action against a fresh observation ref. Scroll targets the
+ * scrollable Accessibility container that contains (or is) the referenced
+ * element and, like AXPress, its receipt is honest rather than optimistic: a
+ * successful dispatch is reported as 'unknown', and whether content actually
+ * moved is decided by re-observation, never inferred from the receipt. A scroll
+ * whose live window/app identity no longer matches is rejected exactly like
+ * every other action.
+ */
 export type ComputerAction =
   | { kind: 'click'; ref: string }
   | { kind: 'focus'; ref: string }
   | { kind: 'type'; ref: string; text: string }
   | { kind: 'key'; ref: string; key: string; modifiers?: ComputerModifier[] }
+  | { kind: 'scroll'; ref: string; direction: ComputerScrollDirection; amount?: ComputerScrollAmount }
 
 export interface ComputerPostActionObservation {
   capturedAt: string

@@ -4,6 +4,8 @@ import type {
   ComputerAppSelector,
   ComputerFrame,
   ComputerModifier,
+  ComputerScrollAmount,
+  ComputerScrollDirection,
   ComputerWindowIdentity,
   ComputerWindowSelector,
 } from './contracts.js'
@@ -127,6 +129,7 @@ export type NativeActionPayload =
   | { kind: 'focus' }
   | { kind: 'type'; text: string }
   | { kind: 'key'; key: string; modifiers: ComputerModifier[] }
+  | { kind: 'scroll'; direction: ComputerScrollDirection; amount: ComputerScrollAmount }
 
 export interface NativeActionResult {
   status: ComputerActionStatus

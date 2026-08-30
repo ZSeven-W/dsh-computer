@@ -461,7 +461,7 @@ test('computer evidence losslessly exposes stable helper, TCC, signing, process,
   const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
   const evidence = await controller.evidence({ scopeId: 'agent-a' })
 
-  assert.equal(evidence.contractVersion, 2)
+  assert.equal(evidence.contractVersion, 3)
   assert.deepEqual(evidence.status, {
     platform: 'macos', helper: 'ready',
     accessibilityTrusted: status.accessibilityTrusted,
@@ -776,6 +776,81 @@ test('safe focus and navigation perform one live preflight without asking for ap
       assert.equal(nativeAct.request.approval, null)
     })
   }
+})
+
+test('scroll is safe, dispatches once with a normalized amount, and reports an honest unknown receipt', async () => {
+  const native = new FakeNative()
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const seen = await controller.observe({}, { scopeId: 'agent-a' })
+  let approvalCalls = 0
+  const receipt = await controller.act(
+    { kind: 'scroll', ref: seen.targets[0].ref, direction: 'down' },
+    {
+      scopeId: 'agent-a',
+      approval: { async request() { approvalCalls += 1; return 'allowed-once' } },
+    },
+  )
+  assert.equal(receipt.status, 'unknown')
+  assert.equal(receipt.action, 'scroll')
+  assert.equal(receipt.nativeAccepted, true)
+  assert.equal(approvalCalls, 0)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'observe').length, 2)
+  const nativeAct = native.requests.find(entry => entry.request.command === 'act')
+  assert.deepEqual(nativeAct.request.action, { kind: 'scroll', direction: 'down', amount: 'page' })
+  assert.equal(nativeAct.request.approval, null)
+})
+
+test('scroll preserves an explicit amount and rejects invalid direction or amount before native dispatch', async t => {
+  await t.test('explicit numeric amount', async () => {
+    const native = new FakeNative()
+    const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+    const seen = await controller.observe({}, { scopeId: 'agent-a' })
+    const receipt = await controller.act(
+      { kind: 'scroll', ref: seen.targets[0].ref, direction: 'up', amount: 120 }, { scopeId: 'agent-a' },
+    )
+    assert.equal(receipt.status, 'unknown')
+    const nativeAct = native.requests.find(entry => entry.request.command === 'act')
+    assert.deepEqual(nativeAct.request.action, { kind: 'scroll', direction: 'up', amount: 120 })
+  })
+
+  for (const bad of [
+    { direction: 'sideways', amount: 'page' },
+    { direction: 'down', amount: -3 },
+    { direction: 'down', amount: 0 },
+    { direction: 'down', amount: 'bogus' },
+  ]) {
+    await t.test(JSON.stringify(bad), async () => {
+      const native = new FakeNative()
+      const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+      const seen = await controller.observe({}, { scopeId: 'agent-a' })
+      const receipt = await controller.act(
+        { kind: 'scroll', ref: seen.targets[0].ref, ...bad }, { scopeId: 'agent-a' },
+      )
+      assert.equal(receipt.status, 'rejected')
+      assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
+    })
+  }
+})
+
+test('a scroll whose live target identity changed is rejected before native dispatch', async () => {
+  const native = new FakeNative()
+  let observeCount = 0
+  const baseRequest = native.request.bind(native)
+  native.request = async (request, options) => {
+    if (request.command === 'observe' && ++observeCount > 1) {
+      native.requests.push({ request: structuredClone(request), scopeId: options.scopeId })
+      return observation({ nodes: [node({ name: 'Rebound target', identifier: 'different' })] })
+    }
+    return baseRequest(request, options)
+  }
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const seen = await controller.observe({}, { scopeId: 'agent-a' })
+  const receipt = await controller.act(
+    { kind: 'scroll', ref: seen.targets[0].ref, direction: 'down' }, { scopeId: 'agent-a' },
+  )
+  assert.equal(receipt.status, 'rejected')
+  assert.match(receipt.reason, /changed/)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
 })
 
 test('native receives the full observed identity and its post-action evidence is preserved', async () => {

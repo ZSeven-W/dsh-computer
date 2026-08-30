@@ -5,7 +5,7 @@ import { app, windowIdentity } from './fixtures.mjs'
 
 function driver() {
   return {
-    kind: 'computer', platform: 'macos', contractVersion: 2,
+    kind: 'computer', platform: 'macos', contractVersion: 3,
     async observe() { throw new Error('not reached') },
     async visualObserve() { throw new Error('not reached') },
     async act() { throw new Error('not reached') },
@@ -96,6 +96,36 @@ test('raw structural tools expose full object-root parameter schemas', () => {
   assert.equal('approval' in tools.computerAct.parameters.properties, false)
   assert.equal('approved' in tools.computerAct.parameters.properties, false)
   assert.equal('risk' in tools.computerAct.parameters.properties, false)
+  assert.deepEqual(
+    tools.computerAct.parameters.properties.action.enum,
+    ['click', 'focus', 'type', 'key', 'scroll'],
+  )
+  assert.equal('direction' in tools.computerAct.parameters.properties, true)
+  assert.equal('amount' in tools.computerAct.parameters.properties, true)
+})
+
+test('computer_act parses scroll into the bound driver action and validates its inputs', async () => {
+  const fake = driver()
+  const received = []
+  fake.act = async action => { received.push(action); return { status: 'unknown' } }
+  const tools = createComputerTools(fake)
+  const exec = execution()
+
+  await tools.computerAct.execute({ action: 'scroll', ref: 'cu_private', direction: 'down' }, exec)
+  assert.deepEqual(received.at(-1), { kind: 'scroll', ref: 'cu_private', direction: 'down' })
+  await tools.computerAct.execute({ action: 'scroll', ref: 'cu_private', direction: 'up', amount: 'page' }, exec)
+  assert.deepEqual(received.at(-1), { kind: 'scroll', ref: 'cu_private', direction: 'up', amount: 'page' })
+  await tools.computerAct.execute({ action: 'scroll', ref: 'cu_private', direction: 'down', amount: 150 }, exec)
+  assert.deepEqual(received.at(-1), { kind: 'scroll', ref: 'cu_private', direction: 'down', amount: 150 })
+
+  await assert.rejects(
+    tools.computerAct.execute({ action: 'scroll', ref: 'cu_private', direction: 'sideways' }, exec),
+    /direction is required/u,
+  )
+  await assert.rejects(
+    tools.computerAct.execute({ action: 'scroll', ref: 'cu_private', direction: 'down', amount: -1 }, exec),
+    /amount must be line, page, or a positive number/u,
+  )
 })
 
 test('text-only exact route is rejected before native capture or attachment write', async () => {

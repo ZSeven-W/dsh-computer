@@ -241,6 +241,7 @@ function nativeAction(action: ComputerAction): NativeActionPayload {
     case 'focus': return { kind: 'focus' }
     case 'type': return { kind: 'type', text: action.text }
     case 'key': return { kind: 'key', key: normalizeKeyName(action.key), modifiers: normalizeModifiers(action.modifiers) }
+    case 'scroll': return { kind: 'scroll', direction: action.direction, amount: action.amount ?? 'page' }
   }
 }
 
@@ -255,6 +256,12 @@ function immutableActionSnapshot(input: ComputerAction): ComputerAction {
       const modifiers = normalizeModifiers(input.modifiers === undefined ? undefined : [...input.modifiers])
       Object.freeze(modifiers)
       snapshot = { kind: 'key', ref: input.ref, key: normalizeKeyName(input.key), modifiers }
+      break
+    }
+    case 'scroll': {
+      snapshot = input.amount === undefined
+        ? { kind: 'scroll', ref: input.ref, direction: input.direction }
+        : { kind: 'scroll', ref: input.ref, direction: input.direction, amount: input.amount }
       break
     }
   }
@@ -876,6 +883,19 @@ export class ComputerController implements ComputerDriver {
         status: 'rejected', action, observation, startedAt,
         reason: 'key must be a non-empty supported key name', nativeAccepted: false, postAction: null,
       })
+    }
+    if (action.kind === 'scroll') {
+      const amount = action.amount
+      const invalidAmount = amount !== undefined
+        && amount !== 'line' && amount !== 'page'
+        && (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0)
+      if ((action.direction !== 'up' && action.direction !== 'down') || invalidAmount) {
+        return this.#receipt(state, {
+          status: 'rejected', action, observation, startedAt,
+          reason: 'scroll requires direction up/down and an optional positive line/page/point amount',
+          nativeAccepted: false, postAction: null,
+        })
+      }
     }
     let initialRisk: ComputerActionRisk
     try {
