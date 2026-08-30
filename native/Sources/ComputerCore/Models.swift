@@ -136,17 +136,68 @@ public struct ElementIdentity: Codable, Equatable, Sendable {
     }
 }
 
+/// Scroll amount: a semantic line/page unit or an exact positive point delta.
+public enum ScrollAmount: Equatable, Sendable, Codable {
+    case line
+    case page
+    case points(Double)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let text = try? container.decode(String.self) {
+            switch text {
+            case "line": self = .line
+            case "page": self = .page
+            default:
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "unsupported scroll amount: \(text)"
+                )
+            }
+            return
+        }
+        let points = try container.decode(Double.self)
+        guard points.isFinite, points > 0 else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "scroll point amount must be a finite positive number"
+            )
+        }
+        self = .points(points)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .line: try container.encode("line")
+        case .page: try container.encode("page")
+        case .points(let value): try container.encode(value)
+        }
+    }
+}
+
 public struct ActionPayload: Codable, Equatable, Sendable {
     public let kind: String
     public let text: String?
     public let key: String?
     public let modifiers: [String]?
+    public let direction: String?
+    public let amount: ScrollAmount?
 
-    public init(kind: String, text: String? = nil, key: String? = nil, modifiers: [String]? = nil) {
+    public init(
+        kind: String,
+        text: String? = nil,
+        key: String? = nil,
+        modifiers: [String]? = nil,
+        direction: String? = nil,
+        amount: ScrollAmount? = nil
+    ) {
         self.kind = kind
         self.text = text
         self.key = key
         self.modifiers = modifiers
+        self.direction = direction
+        self.amount = amount
     }
 }
 

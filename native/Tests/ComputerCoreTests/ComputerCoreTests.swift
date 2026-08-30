@@ -182,6 +182,40 @@ final class ComputerCoreTests: XCTestCase {
         XCTAssertEqual(RiskPolicy.classify(action: ActionPayload(kind: "click"), target: target(name: "Open")), .safe)
     }
 
+    func testScrollIsSafeAndNeverRequiresApproval() {
+        XCTAssertEqual(
+            RiskPolicy.classify(action: ActionPayload(kind: "scroll", direction: "down"), target: target(name: "List")),
+            .safe
+        )
+        XCTAssertEqual(
+            RiskPolicy.classify(
+                action: ActionPayload(kind: "scroll", direction: "up", amount: .points(120)), target: target(name: "List")
+            ),
+            .safe
+        )
+        XCTAssertNil(ActionApprovalBinding.digest(action: ActionPayload(kind: "scroll", direction: "down", amount: .page)))
+    }
+
+    func testScrollIsNeverReportedConfirmedFromDispatchAlone() {
+        let before = target(name: "List")
+        XCTAssertFalse(ActionConfirmation.isConfirmed(
+            action: ActionPayload(kind: "scroll", direction: "down", amount: .page),
+            before: before, post: before, postIdentityMatches: true
+        ))
+    }
+
+    func testScrollAmountDecodesLinePageAndPositivePoints() throws {
+        func decode(_ json: String) throws -> ScrollAmount {
+            try JSONDecoder().decode(ScrollAmount.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(try decode(#""line""#), .line)
+        XCTAssertEqual(try decode(#""page""#), .page)
+        XCTAssertEqual(try decode("150"), .points(150))
+        XCTAssertThrowsError(try decode("0"))
+        XCTAssertThrowsError(try decode("-1"))
+        XCTAssertThrowsError(try decode(#""bogus""#))
+    }
+
     func testActionDigestMatchesTheTypeScriptCanonicalV1Contract() {
         XCTAssertEqual(
             ActionApprovalBinding.digest(action: ActionPayload(kind: "click")),

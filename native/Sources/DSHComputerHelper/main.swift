@@ -546,6 +546,11 @@ private func intAttribute(_ element: AXUIElement, _ name: CFString) -> Int? {
     return nil
 }
 
+private func doubleAttribute(_ element: AXUIElement, _ name: CFString) -> Double? {
+    if let value = attribute(element, name) as? NSNumber { return value.doubleValue }
+    return nil
+}
+
 private func elementAttribute(_ element: AXUIElement, _ name: CFString) -> AXUIElement? {
     guard let value = attribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
     return unsafeDowncast(value, to: AXUIElement.self)
@@ -1057,6 +1062,87 @@ private func isSettable(_ element: AXUIElement, _ attribute: CFString) -> Bool {
     return AXUIElementIsAttributeSettable(element, attribute, &settable) == .success && settable.boolValue
 }
 
+/// Scroll dispatch strategy (WP13). Preference order from the contract:
+///   (a) AX-native: adjust the containing AXScrollArea's vertical scroll bar
+///       AXValue — focus-safe, deterministic, and the only path that targets
+///       the bound window without moving the pointer.
+///   (b) Scroll-wheel CGEvent: REJECTED. A scroll-wheel event is routed by the
+///       pointer's screen position and cannot be bound to a specific window
+///       without raising/focusing it or hijacking the global pointer, both of
+///       which this driver forbids. (a) is implemented because it genuinely
+///       works for every AppKit AXScrollArea (NSScrollView/NSTableView).
+
+/// The scrollable container that contains (or is) the referenced element.
+/// Walks the Accessibility parent chain up to the observed window; anything
+/// further up (the application, other windows) is out of scope.
+private func scrollableContainer(_ element: AXUIElement, window: AXUIElement) -> AXUIElement? {
+    var current: AXUIElement? = element
+    for _ in 0..<16 {
+        guard let node = current else { return nil }
+        if stringAttribute(node, kAXRoleAttribute as CFString) == "AXScrollArea" { return node }
+        if CFHash(node) == CFHash(window) { return nil }
+        current = elementAttribute(node, kAXParentAttribute as CFString)
+    }
+    return nil
+}
+
+/// The vertical scroll bar of an AXScrollArea, chosen by explicit orientation
+/// and falling back to the sole scroll bar when orientation is unavailable.
+private func verticalScrollBar(_ scrollArea: AXUIElement) -> AXUIElement? {
+    let bars = elementArrayAttribute(scrollArea, kAXChildrenAttribute as CFString)
+        .filter { stringAttribute($0, kAXRoleAttribute as CFString) == "AXScrollBar" }
+    if let vertical = bars.first(where: {
+        stringAttribute($0, "AXOrientation" as CFString) == "AXVerticalOrientation"
+    }) { return vertical }
+    return bars.count == 1 ? bars[0] : nil
+}
+
+private let lineScrollPoints = 40.0
+
+/// Compute the next vertical scroll bar value for the requested direction and
+/// amount. The scroller value is normalized to its own min...max range; a page
+/// maps to one viewport height and a point amount maps through the measured
+/// content-minus-viewport overflow. This is focus-safe and deterministic: it
+/// adjusts the scroll area's own scroll bar, never the pointer.
+private func scrolledValue(
+    scrollArea: AXUIElement,
+    scrollBar: AXUIElement,
+    direction: String,
+    amount: ScrollAmount?
+) throws -> Double {
+    let current = doubleAttribute(scrollBar, kAXValueAttribute as CFString) ?? 0
+    let minValue = doubleAttribute(scrollBar, kAXMinValueAttribute as CFString) ?? 0
+    let maxValue = doubleAttribute(scrollBar, kAXMaxValueAttribute as CFString) ?? 1
+    guard maxValue > minValue else {
+        throw HelperFailure(code: "scroll_bounds_unavailable", message: "vertical scroll bar exposes no usable value range")
+    }
+    guard let viewportHeight = sizeAttribute(scrollArea, kAXSizeAttribute as CFString)?.height, viewportHeight > 0 else {
+        throw HelperFailure(code: "scroll_bounds_unavailable", message: "scroll area has no measurable viewport height")
+    }
+    var contentHeight = 0.0
+    for child in elementArrayAttribute(scrollArea, kAXChildrenAttribute as CFString) {
+        let role = stringAttribute(child, kAXRoleAttribute as CFString)
+        if role == "AXScrollBar" || role == "AXValueIndicator" { continue }
+        if let height = sizeAttribute(child, kAXSizeAttribute as CFString)?.height { contentHeight = max(contentHeight, height) }
+    }
+    guard contentHeight > viewportHeight else {
+        throw HelperFailure(code: "scroll_not_scrollable", message: "scroll area content fits its viewport; nothing to scroll")
+    }
+    let scrollable = contentHeight - viewportHeight
+    let pointDelta: Double
+    switch amount ?? .page {
+    case .page: pointDelta = viewportHeight
+    case .line: pointDelta = lineScrollPoints
+    case .points(let value): pointDelta = value
+    }
+    guard pointDelta.isFinite, pointDelta > 0 else {
+        throw HelperFailure(code: "invalid_action", message: "scroll amount must be a positive point distance")
+    }
+    let valueDelta = pointDelta / scrollable * (maxValue - minValue)
+    let signed = direction == "down" ? valueDelta : -valueDelta
+    return min(maxValue, max(minValue, current + signed))
+}
+
 private func tryPost(expected: ExpectedTarget) -> PostObservation? {
     guard currentInteractiveSessionAvailability().interactiveSessionAvailable else { return nil }
     guard let running = NSRunningApplication(processIdentifier: expected.app.pid), !running.isTerminated,
@@ -1083,7 +1169,8 @@ private func unknownAfterMutation(expected: ExpectedTarget, reason: String) -> A
 }
 
 private func preflightFailureStatus(_ failure: HelperFailure) -> String {
-    if failure.code.hasPrefix("stale_") || failure.code == "accessibility_permission_required"
+    if failure.code.hasPrefix("stale_") || failure.code.hasPrefix("scroll_")
+        || failure.code == "accessibility_permission_required"
         || failure.code == "session_locked"
         || failure.code == "unsupported_key" || failure.code == "invalid_modifier"
         || failure.code == "focus_not_supported" || failure.code == "value_not_settable"
@@ -1106,6 +1193,7 @@ private func actionResult(_ request: Request) -> ActionResult {
         // Validate every fallible prerequisite before the first AX/CG mutation.
         // Once mutation begins, every later error is an ambiguous outcome.
         var preparedKey: PreparedKey?
+        var preparedScroll: (scrollBar: AXUIElement, value: Double)?
         switch action.kind {
         case "click":
             guard before.actions.contains(kAXPressAction as String) else {
@@ -1136,6 +1224,23 @@ private func actionResult(_ request: Request) -> ActionResult {
             if before.focused != true && !isSettable(element, kAXFocusedAttribute as CFString) {
                 throw HelperFailure(code: "focus_not_supported", message: "target cannot be focused before key dispatch")
             }
+        case "scroll":
+            guard let direction = action.direction, direction == "up" || direction == "down" else {
+                throw HelperFailure(code: "invalid_action", message: "scroll direction must be up or down")
+            }
+            guard let scrollArea = scrollableContainer(element, window: resolved.windowElement) else {
+                throw HelperFailure(code: "scroll_area_not_found", message: "referenced element is not inside an Accessibility scroll area")
+            }
+            guard let scrollBar = verticalScrollBar(scrollArea) else {
+                throw HelperFailure(code: "scroll_not_supported", message: "scroll area exposes no vertical scroll bar")
+            }
+            guard isSettable(scrollBar, kAXValueAttribute as CFString) else {
+                throw HelperFailure(code: "scroll_not_supported", message: "vertical scroll bar value is not settable")
+            }
+            preparedScroll = (
+                scrollBar,
+                try scrolledValue(scrollArea: scrollArea, scrollBar: scrollBar, direction: direction, amount: action.amount)
+            )
         default:
             throw HelperFailure(code: "invalid_action", message: "unsupported action: \(action.kind)")
         }
@@ -1204,6 +1309,22 @@ private func actionResult(_ request: Request) -> ActionResult {
             mutationStarted = true
             preparedKey.down.postToPid(resolved.appIdentity.pid)
             preparedKey.up.postToPid(resolved.appIdentity.pid)
+        case "scroll":
+            guard let preparedScroll else {
+                throw HelperFailure(code: "scroll_not_supported", message: "prepared scroll value disappeared")
+            }
+            mutationStarted = true
+            let scrollCode = AXUIElementSetAttributeValue(
+                preparedScroll.scrollBar,
+                kAXValueAttribute as CFString,
+                preparedScroll.value as CFNumber
+            )
+            guard scrollCode == .success else {
+                return unknownAfterMutation(
+                    expected: expected,
+                    reason: "scroll value was attempted but returned code \(scrollCode.rawValue); visible movement is unknown"
+                )
+            }
         default:
             break
         }
@@ -1232,6 +1353,12 @@ private func actionResult(_ request: Request) -> ActionResult {
                 reason: confirmed
                     ? "AXPress succeeded and a value transition was re-observed on the same live target"
                     : "AXPress succeeded but no action-specific effect was proven on the same live target",
+                accepted: true, post: post
+            )
+        case "scroll":
+            return ActionResult(
+                status: "unknown",
+                reason: "scroll was dispatched; content movement is decided by re-observation",
                 accepted: true, post: post
             )
         default:
