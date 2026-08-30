@@ -293,28 +293,48 @@ function frameMatches(
     && Math.abs(expected.height - live.height) <= 1
 }
 
-function appMatches(expected: NativeObserveResult['app'], live: NativeObserveResult['app']): boolean {
-  return expected.bundleId === live.bundleId
-    && expected.pid === live.pid
-    && expected.launchIdentity !== null
-    && expected.launchIdentity === live.launchIdentity
+/**
+ * Field-specific "what changed" reasons mirroring the native IdentityVerifier
+ * vocabulary, so a failed re-verification can name the exact change instead of
+ * collapsing everything into a fingerprint mismatch. Values are never embedded,
+ * so no window title or field content can leak.
+ */
+function appChangedReason(expected: NativeObserveResult['app'], live: NativeObserveResult['app']): string | null {
+  if (expected.bundleId !== live.bundleId) return 'application bundle identifier changed'
+  if (expected.pid !== live.pid) return 'application PID changed'
+  if (expected.launchIdentity === null || expected.launchIdentity !== live.launchIdentity) {
+    return 'application launch identity is missing or changed'
+  }
+  return null
 }
 
-function windowMatches(expected: NativeObserveResult['window'], live: NativeObserveResult['window']): boolean {
-  return (expected.number !== null ? live.number === expected.number : live.identity === expected.identity)
-    && expected.role === live.role
-    && expected.subrole === live.subrole
-    && expected.title === live.title
-    && frameMatches(expected.frame, live.frame)
+function windowChangedReason(expected: NativeObserveResult['window'], live: NativeObserveResult['window']): string | null {
+  if (expected.number !== null) {
+    if (live.number !== expected.number) return 'window number changed'
+  } else if (live.identity !== expected.identity) {
+    return 'window identity changed'
+  }
+  if (expected.role !== live.role || expected.subrole !== live.subrole) return 'window role changed'
+  if (expected.title !== live.title) return 'window title changed'
+  if (expected.frame === null) {
+    if (live.frame !== null) return 'window frame appeared'
+  } else if (!frameMatches(expected.frame, live.frame)) {
+    return 'window frame changed'
+  }
+  return null
 }
 
-function elementMatches(expected: NativeObservedNode, live: NativeObservedNode): boolean {
-  return expected.role === live.role
-    && expected.subrole === live.subrole
-    && expected.identifier === live.identifier
-    && expected.name === live.name
-    && expected.secure === live.secure
-    && frameMatches(expected.frame, live.frame)
+function elementChangedReason(expected: NativeObservedNode, live: NativeObservedNode): string | null {
+  if (expected.role !== live.role || expected.subrole !== live.subrole) return 'target role changed'
+  if (expected.identifier !== live.identifier) return 'target identifier changed'
+  if (expected.name !== live.name) return 'target name changed'
+  if (expected.frame === null) {
+    if (live.frame !== null) return 'target frame appeared'
+  } else if (!frameMatches(expected.frame, live.frame)) {
+    return 'target frame changed'
+  }
+  if (expected.secure !== live.secure) return 'target security role changed'
+  return null
 }
 
 function locatorMatches(left: readonly number[], right: readonly number[]): boolean {
@@ -793,18 +813,27 @@ export class ComputerController implements ComputerDriver {
       ...(signal === undefined ? {} : { signal }),
     })
     const result = structuredClone(nativeResult)
-    if (!appMatches(observation.native.app, result.app)) {
-      throw new LivePreflightError('live application identity changed; run computer_observe again')
+    const appReason = appChangedReason(observation.native.app, result.app)
+    if (appReason !== null) {
+      throw new LivePreflightError(`live application identity changed: ${appReason}; run computer_observe again`)
     }
-    if (!windowMatches(observation.native.window, result.window)) {
-      throw new LivePreflightError('live window identity changed; run computer_observe again')
+    const windowReason = windowChangedReason(observation.native.window, result.window)
+    if (windowReason !== null) {
+      throw new LivePreflightError(`live window identity changed: ${windowReason}; run computer_observe again`)
+    }
+    // Re-verify the specific target before the whole-observation fingerprint so
+    // a target move/rename/disappearance names the target, while other observed
+    // element changes still surface as a fingerprint mismatch.
+    const live = result.nodes.find(node => locatorMatches(node.locator, target.nativeTarget.locator))
+    if (!live) {
+      throw new LivePreflightError('live target identity changed: target disappeared; run computer_observe again')
+    }
+    const elementReason = elementChangedReason(target.nativeTarget, live)
+    if (elementReason !== null) {
+      throw new LivePreflightError(`live target identity changed: ${elementReason}; run computer_observe again`)
     }
     if (fingerprint(result) !== observation.fingerprint) {
       throw new LivePreflightError('live observation fingerprint changed; run computer_observe again')
-    }
-    const live = result.nodes.find(node => locatorMatches(node.locator, target.nativeTarget.locator))
-    if (!live || !elementMatches(target.nativeTarget, live)) {
-      throw new LivePreflightError('live target identity changed; run computer_observe again')
     }
     return live
   }
@@ -922,12 +951,33 @@ export class ComputerController implements ComputerDriver {
     }
     state.busyObservations.add(observation.id)
     const scopeGeneration = this.#scopeGeneration(scope)
-    const bindingFailure = (): string | null => {
+
+    // A human's deliberation time must not consume the freshness budget. Record
+    // how long the approval gate held before answering so the post-approval TTL
+    // check can be measured against the pre-approval instant.
+    let approvalElapsedMs = 0
+    let approvalRisk: Extract<ComputerActionRisk, { kind: 'approval-required' }> | null = null
+
+    const hardBindingFailure = (): string | null => {
       if (this.#disposed || this.#scopeGeneration(scope) !== scopeGeneration) {
         return 'Agent scope was disposed before action dispatch'
       }
-      if (state.refs.get(action.ref) !== located) return 'observation was consumed by another action; run computer_observe again'
-      if (observation.expiresAtMs <= this.#now()) {
+      if (state.refs.get(action.ref) !== located) {
+        return 'observation was consumed by another action; run computer_observe again'
+      }
+      return null
+    }
+
+    const bindingFailure = (): string | null => {
+      const hard = hardBindingFailure()
+      if (hard !== null) return hard
+      // The freshness budget excludes the approval wait: the TTL is evaluated
+      // against the pre-approval instant (expiresAtMs + approvalElapsedMs). A
+      // stale observation fails closed for the safe path exactly as before; for
+      // a granted approval it is re-verified by the live preflight below instead
+      // of being rejected on the clock alone.
+      const stale = observation.expiresAtMs + approvalElapsedMs <= this.#now()
+      if (stale && approvalRisk === null) {
         this.#dropObservation(state, observation)
         return 'observation expired before action dispatch; run computer_observe again'
       }
@@ -935,7 +985,6 @@ export class ComputerController implements ComputerDriver {
     }
 
     try {
-      let approvalRisk: Extract<ComputerActionRisk, { kind: 'approval-required' }> | null = null
 
       // Approval-required actions receive one read-only preflight before the
       // prompt, but never hold the global window lock while waiting on a user.
@@ -970,11 +1019,13 @@ export class ComputerController implements ComputerDriver {
 
         let outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' = 'unavailable'
         if (context.approval !== undefined) {
+          const approvalStartedAtMs = this.#now()
           try {
             outcome = await context.approval.request(informedApprovalReason(action, initialRisk, observation, preApprovalLive))
           } catch {
             outcome = 'unavailable'
           }
+          approvalElapsedMs = Math.max(0, this.#now() - approvalStartedAtMs)
         }
         if (outcome !== 'allowed-once') {
           return this.#receipt(state, {
@@ -982,6 +1033,10 @@ export class ComputerController implements ComputerDriver {
             reason: approvalDenialReason(outcome, initialRisk), nativeAccepted: false, postAction: null,
           })
         }
+        // A granted approval makes this action approval-bound: the clock can no
+        // longer reject it, only a live re-verification that proves a real
+        // change (or a hard binding failure) can.
+        approvalRisk = initialRisk
         const invalidAfterApproval = bindingFailure()
         if (invalidAfterApproval) {
           return this.#receipt(state, {
@@ -990,7 +1045,6 @@ export class ComputerController implements ComputerDriver {
             nativeAccepted: false, postAction: null,
           })
         }
-        approvalRisk = initialRisk
       }
 
       let releaseWindow: (() => void) | undefined
@@ -1020,7 +1074,11 @@ export class ComputerController implements ComputerDriver {
           const reason = error instanceof NativeHelperError ? `${error.code}: ${error.message}` : errorMessage(error)
           return this.#receipt(state, {
             status: preflightReceiptStatus(error), action, observation, startedAt,
-            reason: approvalRisk === null ? reason : `approved action was not dispatched after live revalidation: ${reason}`,
+            reason: approvalRisk === null
+              ? reason
+              : error instanceof LivePreflightError
+                ? `the view changed while you were deciding: ${reason}`
+                : `approved action was not dispatched: ${reason}`,
             nativeAccepted: false, postAction: null,
           })
         }

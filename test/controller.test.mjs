@@ -658,11 +658,15 @@ test('approval-stable fingerprint tolerates focus and unrelated static text chan
 })
 
 test('approval-stable fingerprint rejects interactive value or label changes after approval', async t => {
-  for (const changedField of ['value', 'name']) {
+  const expectations = [
+    { changedField: 'value', changedValue: 'disarmed', reason: /fingerprint changed/u },
+    { changedField: 'name', changedValue: 'Delete workspace', reason: /target name changed/u },
+  ]
+  for (const { changedField, changedValue, reason } of expectations) {
     await t.test(changedField, async () => {
       const risky = node({ name: 'Delete account', identifier: 'delete-account', value: 'armed' })
       const initial = observation({ nodes: [risky] })
-      const changedNode = { ...risky, [changedField]: changedField === 'value' ? 'disarmed' : 'Delete workspace' }
+      const changedNode = { ...risky, [changedField]: changedValue }
       let observeCount = 0
       const native = new FakeNative()
       const baseRequest = native.request.bind(native)
@@ -679,7 +683,8 @@ test('approval-stable fingerprint rejects interactive value or label changes aft
         { scopeId: 'agent-a', approval: { async request() { return 'allowed-once' } } },
       )
       assert.equal(receipt.status, 'rejected')
-      assert.match(receipt.reason, /fingerprint changed/u)
+      assert.match(receipt.reason, /the view changed while you were deciding/u)
+      assert.match(receipt.reason, reason)
       assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
     })
   }
@@ -711,7 +716,7 @@ test('all non-grant approval outcomes and approval exceptions fail closed withou
   }
 })
 
-test('an allowed-once grant is consumed if the observation expires while approval is pending', async () => {
+test('a slow approval longer than the TTL still dispatches exactly once when the target is unchanged', async () => {
   let now = 1_000
   const native = new FakeNative({ observation: observation({ nodes: [node({ name: 'Submit order' })] }) })
   const controller = new ComputerController({ native, now: () => now, id: ids(), platform: 'darwin' })
@@ -723,10 +728,88 @@ test('an allowed-once grant is consumed if the observation expires while approva
       approval: { async request() { now = 2_001; return 'allowed-once' } },
     },
   )
-  assert.equal(receipt.status, 'rejected')
-  assert.match(receipt.reason, /approved action was not dispatched.*expired/u)
-  assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
-  assert.equal(native.requests.filter(entry => entry.request.command === 'observe').length, 2)
+  assert.equal(receipt.status, 'unknown')
+  assert.equal(receipt.nativeAccepted, true)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 1)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'observe').length, 3)
+
+  // The allowed-once decision consumed the observation: a second act cannot
+  // re-dispatch the same target.
+  const second = await controller.act({ kind: 'click', ref: seen.targets[0].ref }, { scopeId: 'agent-a' })
+  assert.equal(second.status, 'rejected')
+  assert.match(second.reason, /unknown reference/)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 1)
+})
+
+test('a slow approval longer than the TTL rejects when the live identity changed during deliberation', async t => {
+  const risky = node({ name: 'Submit order' })
+  const cases = [
+    {
+      name: 'window number',
+      mutate: base => ({ ...base, window: { ...base.window, number: 18 } }),
+      reason: /window number changed/u,
+    },
+    {
+      name: 'application PID',
+      mutate: base => ({ ...base, app: { ...base.app, pid: 9999 } }),
+      reason: /application PID changed/u,
+    },
+    {
+      name: 'launch identity',
+      mutate: base => ({ ...base, app: { ...base.app, launchIdentity: 'different-launch-identity' } }),
+      reason: /launch identity is missing or changed/u,
+    },
+    {
+      name: 'target name',
+      mutate: base => ({ ...base, nodes: [node({ name: 'Renamed target' })] }),
+      reason: /target name changed/u,
+    },
+  ]
+  for (const { name, mutate, reason } of cases) {
+    await t.test(name, async () => {
+      let now = 1_000
+      const initial = observation({ nodes: [risky] })
+      const changed = mutate(initial)
+      let observeCount = 0
+      const native = new FakeNative()
+      const baseRequest = native.request.bind(native)
+      native.request = async (request, options) => {
+        if (request.command !== 'observe') return baseRequest(request, options)
+        native.requests.push({ request: structuredClone(request), scopeId: options.scopeId })
+        observeCount += 1
+        return structuredClone(observeCount < 3 ? initial : changed)
+      }
+      const controller = new ComputerController({ native, now: () => now, id: ids(), platform: 'darwin' })
+      const seen = await controller.observe({ ttlMs: 1_000 }, { scopeId: 'agent-a' })
+      const receipt = await controller.act(
+        { kind: 'click', ref: seen.targets[0].ref },
+        { scopeId: 'agent-a', approval: { async request() { now = 2_001; return 'allowed-once' } } },
+      )
+      assert.equal(receipt.status, 'rejected')
+      assert.equal(receipt.nativeAccepted, false)
+      assert.match(receipt.reason, /the view changed while you were deciding/u)
+      assert.match(receipt.reason, reason)
+      assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
+    })
+  }
+})
+
+test('a slow approval that is cancelled, rejected, or unavailable still fails closed', async t => {
+  for (const outcome of ['rejected', 'cancelled', 'unavailable']) {
+    await t.test(outcome, async () => {
+      let now = 1_000
+      const native = new FakeNative({ observation: observation({ nodes: [node({ name: 'Publish now' })] }) })
+      const controller = new ComputerController({ native, now: () => now, id: ids(), platform: 'darwin' })
+      const seen = await controller.observe({ ttlMs: 1_000 }, { scopeId: 'agent-a' })
+      const receipt = await controller.act(
+        { kind: 'click', ref: seen.targets[0].ref },
+        { scopeId: 'agent-a', approval: { async request() { now = 2_001; return outcome } } },
+      )
+      assert.equal(receipt.status, 'rejected')
+      assert.equal(receipt.nativeAccepted, false)
+      assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
+    })
+  }
 })
 
 test('an allowed-once grant is consumed when the live target changes from risky to safe', async () => {
@@ -747,7 +830,8 @@ test('an allowed-once grant is consumed when the live target changes from risky 
     { scopeId: 'agent-a', approval: { async request() { return 'allowed-once' } } },
   )
   assert.equal(receipt.status, 'rejected')
-  assert.match(receipt.reason, /approved action was not dispatched after live revalidation/u)
+  assert.match(receipt.reason, /the view changed while you were deciding/u)
+  assert.match(receipt.reason, /target name changed/u)
   assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
 })
 
