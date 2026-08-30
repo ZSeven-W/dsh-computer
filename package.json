@@ -58,6 +58,7 @@
     "test:node": "tsc -p tsconfig.json && node scripts/run-tests.mjs",
     "test:swift": "node scripts/test-swift.mjs",
     "test:native-protocol": "node scripts/native-protocol-smoke.mjs",
+    "test:scroll": "node scripts/scroll-integration.mjs",
     "helper:install-local": "node scripts/install-local-helper.mjs",
     "test": "npm run test:node && npm run test:swift && npm run test:native-protocol",
     "prepack": "npm run build && npm test",

@@ -7,4 +7,5 @@ coverage/
 dist/
 .tmp/
 .swiftpm/
+.pnpm-store/
 scripts/release/release-config.env

@@ -104,7 +104,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 })
 ```
 
-当前 `contractVersion` 为 `2`；v2 新增 `visualObserve(...)` 和完整 Helper/TCC 身份证据。后续消费者应先判断版本，再依赖新增字段。
+当前 `contractVersion` 为 `3`；v3 新增 `scroll` 动作（对包含目标元素的 AX 滚动区域进行原生垂直滚动，返回诚实的 `unknown` 回执）。后续消费者应先判断版本，再依赖新增字段。
 
 ## 本地安装
 

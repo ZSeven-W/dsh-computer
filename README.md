@@ -60,7 +60,7 @@ The first vertical slice deliberately has no settings page. It exposes four head
 | --- | --- |
 | `computer_observe` | Bounded Accessibility tree for one macOS app/window. Returns opaque refs, a fingerprint, and an expiry. |
 | `computer_visual_observe` | Captures only the numbered window bound to a fresh observation, validates its pixels, burns bounded AX Set-of-Mark labels into the image, and delivers it through DSH attachments to the exact current image-capable model. |
-| `computer_act` | Safe `click`, `focus`, `type`, or `key` against one fresh ref. Re-observes identity before every action. |
+| `computer_act` | Safe `click`, `focus`, `type`, `key`, or `scroll` against one fresh ref. Re-observes identity before every action; `scroll` moves the containing AX scroll area and reports `unknown` until re-observation proves the content moved. |
 | `computer_evidence` | Interactive-session, Accessibility, and Screen Recording readiness; Helper executable/bundle/signing/process/caller/resolution identity; and recent receipts for the current Agent only. |
 
 Model arguments never contain an Agent id, an AX path, a PID lease, or a caller-supplied `sensitive` flag. The host supplies the live Agent identity; raw AX locators stay inside the driver.
@@ -105,7 +105,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 })
 ```
 
-`contractVersion` is currently `2`; v2 adds `visualObserve(...)` plus full Helper/TCC identity evidence. Consumers must branch on that value before relying on later fields.
+`contractVersion` is currently `3`; v3 adds the `scroll` action (AX-native vertical scrolling of the containing scroll area with honest `unknown` receipts). Consumers must branch on that value before relying on later fields.
 
 ## Local install
 
@@ -147,7 +147,7 @@ Acceptance includes Node unit tests, Swift pure-policy/identity tests, a real Sw
 
 - macOS only. The package still installs elsewhere so a DSH profile can explain the unsupported platform instead of failing activation; native actions remain unavailable.
 - The current desktop must be unlocked and interactively available. Lock transitions are checked before and after read paths and immediately before mutation; background automation while the login window owns the session is rejected.
-- Native window screenshots are a dedicated multimodal observation path, not a coordinate-action path. There is no OCR, coordinate clicking, scrolling, dragging, clipboard automation, or full IME simulation in this slice.
+- Native window screenshots are a dedicated multimodal observation path, not a coordinate-action path. There is no OCR, coordinate clicking, dragging, clipboard automation, or full IME simulation in this slice. Scrolling is AX-native (adjusting the containing scroll area's vertical scroll bar), never a pointer or wheel event.
 - Visual observation requires an exact AX window number/frame, Screen Recording permission for the reported Helper identity, a mounted DSH attachment store, and an exact current model route that explicitly declares image input. Near-black/transparent captures fail pixel validation; near-white/near-uniform captures are retained with their warning classification.
 - `type` uses a settable Accessibility value; it is not a general replacement for natural keyboard/IME input.
 - Some applications expose incomplete AX names, identifiers, frames, window numbers, or actions. Missing strong launch identity makes action preflight fail closed.
