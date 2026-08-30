@@ -6,6 +6,9 @@ private let targetRow = 57
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
+    private var publishedLabel: NSTextField!
+    private var publishButton: NSButton!
+    private var publishCount = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let window = NSWindow(
@@ -24,6 +27,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         statusLabel.setAccessibilityIdentifier("status-label")
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(statusLabel)
+
+        let publishedLabel = NSTextField(labelWithString: "PUBLISHED: 0")
+        publishedLabel.identifier = NSUserInterfaceItemIdentifier("published-count")
+        publishedLabel.setAccessibilityIdentifier("published-count")
+        publishedLabel.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(publishedLabel)
+
+        let publishButton = NSButton(title: "Publish release", target: self, action: #selector(publishClicked(_:)))
+        publishButton.bezelStyle = .rounded
+        publishButton.setAccessibilityIdentifier("publish-release")
+        publishButton.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(publishButton)
 
         let scrollView = NSScrollView(frame: NSRect(x: 16, y: 16, width: 468, height: 370))
         scrollView.hasVerticalScroller = true
@@ -49,7 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         window.contentView = content
 
         NSLayoutConstraint.activate([
-            statusLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            publishedLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            publishedLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            publishButton.centerYAnchor.constraint(equalTo: publishedLabel.centerYAnchor),
+            publishButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            statusLabel.topAnchor.constraint(equalTo: publishedLabel.bottomAnchor, constant: 10),
             statusLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             scrollView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
@@ -59,6 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         self.window = window
         self.statusLabel = statusLabel
+        self.publishedLabel = publishedLabel
+        self.publishButton = publishButton
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -87,6 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func rowClicked(_ sender: NSButton) {
         guard sender.tag == targetRow else { return }
         statusLabel.stringValue = "Status: clicked"
+    }
+
+    @objc private func publishClicked(_ sender: NSButton) {
+        publishCount += 1
+        publishedLabel.stringValue = "PUBLISHED: \(publishCount)"
     }
 
     @objc private func tableClicked(_ sender: NSTableView) {
