@@ -4,3 +4,7 @@ lib/
 .DS_Store
 native/.build/
 coverage/
+dist/
+.tmp/
+.swiftpm/
+scripts/release/release-config.env

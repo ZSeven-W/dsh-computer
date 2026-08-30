@@ -20,6 +20,11 @@ const BUNDLE_ID = 'io.github.zseven-w.dsh-computer.helper'
 const EXECUTABLE = 'dsh-computer-helper'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const nativeRoot = join(root, 'native')
+const tmpRoot = join(root, '.tmp')
+const clangModuleCache = join(tmpRoot, 'clang-module-cache')
+const swiftpmCache = join(root, '.swiftpm', 'cache')
+const swiftpmConfig = join(root, '.swiftpm', 'config')
+const swiftpmSecurity = join(root, '.swiftpm', 'security')
 const installParent = join(homedir(), 'Library', 'Application Support', 'ZSeven', 'DSH Computer')
 const destination = join(installParent, 'DSH Computer Helper.app')
 
@@ -51,7 +56,7 @@ function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd ?? root,
-      env: process.env,
+      env: options.env ?? process.env,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -89,10 +94,30 @@ if (process.platform !== 'darwin') throw new Error('the local DSH Computer Helpe
 
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 const shortVersion = String(manifest.version).split('-')[0]
-await run('swift', ['build', '-c', 'release', '--package-path', nativeRoot])
-const shown = await run('swift', [
-  'build', '-c', 'release', '--package-path', nativeRoot, '--show-bin-path',
+await Promise.all([
+  mkdir(tmpRoot, { recursive: true }),
+  mkdir(swiftpmCache, { recursive: true }),
+  mkdir(swiftpmConfig, { recursive: true }),
+  mkdir(swiftpmSecurity, { recursive: true }),
 ])
+const swiftEnv = {
+  ...process.env,
+  TMPDIR: tmpRoot,
+  CLANG_MODULE_CACHE_PATH: clangModuleCache,
+}
+const swiftCommon = [
+  '--package-path', nativeRoot,
+  '--scratch-path', join(nativeRoot, '.build'),
+  '--cache-path', swiftpmCache,
+  '--config-path', swiftpmConfig,
+  '--security-path', swiftpmSecurity,
+  '--manifest-cache', 'local',
+  '--disable-sandbox',
+]
+await run('swift', ['build', '-c', 'release', ...swiftCommon], { env: swiftEnv })
+const shown = await run('swift', [
+  'build', '-c', 'release', ...swiftCommon, '--show-bin-path',
+], { env: swiftEnv })
 const builtExecutable = join(shown.stdout.trim(), EXECUTABLE)
 
 await mkdir(installParent, { recursive: true, mode: 0o700 })
