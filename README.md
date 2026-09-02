@@ -107,6 +107,8 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 
 `contractVersion` is currently `4`. v3 added the `scroll` action; v4 makes evidence honest about truncation (`computer_evidence` now carries `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`), makes observation eviction TTL-first rather than count-based (a TTL-valid ref survives later observes, and a ref evicted by the memory ceiling reports `OBSERVATION_EVICTED` instead of a false `unknown reference`), and reports every unmarked Set-of-Mark target in `omitted` with a `mark-budget-exceeded` or `static-label` reason. Consumers must branch on that value before relying on later fields.
 
+Observation retention is also byte-budgeted per Agent scope (32 MiB of serialized payload): when a new observation would exceed the budget, the oldest TTL-valid observations are evicted first — still reported as `OBSERVATION_EVICTED` — and the most recent observation is never evicted.
+
 ## Local install
 
 This candidate is intentionally local-only: it has not been published or installed into `/Applications`.

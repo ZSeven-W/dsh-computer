@@ -46,6 +46,13 @@ const MAX_TTL_MS = 30_000
 // within one TTL) and is only evicted far past this bound with a distinct
 // OBSERVATION_EVICTED receipt instead of a false "unknown reference".
 const MAX_OBSERVATIONS_PER_SCOPE = 512
+// Aggregate memory ceiling per Agent scope, estimated from the serialized
+// native observation payload (see estimateObservationBytes). When inserting a
+// new observation would exceed it, the OLDEST TTL-valid observations are
+// evicted first and recorded as OBSERVATION_EVICTED; the most recent
+// observation is never evicted by this budget. The estimate bounds the
+// retained payload text, not a precise heap measurement.
+const MAX_OBSERVATION_BYTES_PER_SCOPE = 32 * 1024 * 1024
 const MAX_RECEIPTS_PER_SCOPE = 100
 // One tombstone entry per evicted OBSERVATION (refs carry their observation's
 // token, see refObservationToken), so 600 observations of 500 nodes each
@@ -91,6 +98,8 @@ interface ObservationRecord {
   native: NativeObserveResult
   targets: Map<string, ObservationTargetRecord>
   limits: { maxDepth: number; maxNodes: number }
+  /** Serialized-payload byte estimate counted against the scope budget. */
+  payloadBytes: number
 }
 
 interface ScopeState {
@@ -99,6 +108,8 @@ interface ScopeState {
   receipts: ComputerActionReceipt[]
   sequence: number
   receiptsDropped: number
+  /** Running serialized-payload byte total of the retained observations. */
+  payloadBytes: number
   /** Observation tokens whose refs were evicted by the memory bounds (not TTL/consumed). */
   evictedObservations: Set<string>
   busyObservations: Set<string>
@@ -268,6 +279,13 @@ function postAction(value: NativeActionResult['post']): ComputerPostActionObserv
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Serialized-payload byte estimate of one retained native observation. The
+ * scope budget bounds the retained payload text; it deliberately measures
+ * JSON bytes, not a precise heap footprint, and is documented as such. */
+function estimateObservationBytes(result: NativeObserveResult): number {
+  return Buffer.byteLength(JSON.stringify(result), 'utf8')
 }
 
 function nativeAction(action: ComputerAction): NativeActionPayload {
@@ -616,6 +634,7 @@ export class ComputerController implements ComputerDriver {
     const created: ScopeState = {
       observations: new Map(), refs: new Map(), receipts: [], sequence: 0,
       receiptsDropped: 0, evictedObservations: new Set(), busyObservations: new Set(),
+      payloadBytes: 0,
     }
     this.#scopes.set(scope, created)
     return created
@@ -626,8 +645,11 @@ export class ComputerController implements ComputerDriver {
   }
 
   #dropObservation(state: ScopeState, observation: ObservationRecord): void {
-    state.observations.delete(observation.id)
+    const removed = state.observations.delete(observation.id)
     for (const ref of observation.targets.keys()) state.refs.delete(ref)
+    if (removed) {
+      state.payloadBytes = Math.max(0, state.payloadBytes - observation.payloadBytes)
+    }
   }
 
   /** Memory eviction: one tombstone per observation, so a later act on any
@@ -688,6 +710,20 @@ export class ComputerController implements ComputerDriver {
       this.#evictObservation(state, oldest)
     }
 
+    const payloadBytes = estimateObservationBytes(result)
+    // Byte-budget eviction: the oldest TTL-valid observations go first, so a
+    // large retained history can never grow the controller unboundedly. The
+    // observation being inserted is never evicted here — if it alone exceeds
+    // the budget it is retained anyway (the ceiling bounds aggregate growth,
+    // not a single result).
+    while (state.payloadBytes + payloadBytes > MAX_OBSERVATION_BYTES_PER_SCOPE
+      && state.observations.size > 0) {
+      const oldest = state.observations.values().next().value as ObservationRecord | undefined
+      if (!oldest) break
+      this.#evictObservation(state, oldest)
+    }
+    state.payloadBytes += payloadBytes
+
     const observedAtMs = this.#now()
     const id = `obs_${this.#id()}`
     const expiresAtMs = observedAtMs + ttlMs
@@ -701,6 +737,7 @@ export class ComputerController implements ComputerDriver {
       native: result,
       targets: new Map(),
       limits: { maxDepth, maxNodes },
+      payloadBytes,
     }
     for (const [sourceIndex, node] of result.nodes.entries()) {
       // Refs carry their observation token (cu_<token>_<index>) so the

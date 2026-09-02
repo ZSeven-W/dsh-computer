@@ -128,3 +128,28 @@ test('a TTL-valid ref evicted by tombstone overflow still reports OBSERVATION_EV
   assert.doesNotMatch(receipt.reason, /unknown reference/)
   assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
 })
+
+test('aggregate observation payload is byte-budgeted and evicts oldest TTL-valid first (audit A2)', async () => {
+  // ~2 MiB of serialized payload per observation: without a byte budget the
+  // probe retained 512 x 500-node observations (~220 MiB of heap). With a
+  // 32 MiB per-scope budget the oldest observations must be evicted (and
+  // recorded as OBSERVATION_EVICTED) while the most recent one survives.
+  const heavyNode = node(0, { name: 'Heavy', value: 'x'.repeat(2 * 1024 * 1024) })
+  const native = basicNative([heavyNode])
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const first = await controller.observe({ ttlMs: 30_000 }, { scopeId: 'agent-a' })
+  const firstRef = first.targets[0].ref
+  let latest = null
+  for (let index = 0; index < 30; index += 1) {
+    latest = await controller.observe({ ttlMs: 30_000 }, { scopeId: 'agent-a' })
+  }
+  const evidence = await controller.evidence({ scopeId: 'agent-a' }, { limit: 1 })
+  assert.ok(evidence.activeObservations >= 1, 'the most recent observation is never evicted')
+  assert.ok(evidence.activeObservations < 31, 'aggregate payload must be bounded below the retained count')
+  const evicted = await controller.act({ kind: 'click', ref: firstRef }, { scopeId: 'agent-a' })
+  assert.equal(evicted.status, 'rejected')
+  assert.match(evicted.reason, /OBSERVATION_EVICTED/, 'byte-budget eviction must still be reported honestly')
+  const recent = await controller.act({ kind: 'focus', ref: latest.targets[0].ref }, { scopeId: 'agent-a' })
+  assert.equal(recent.status, 'unknown', 'the newest observation stays live and dispatchable')
+  assert.equal(recent.nativeAccepted, true)
+})
