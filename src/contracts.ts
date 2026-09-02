@@ -131,6 +131,24 @@ export interface ComputerVisualOmission {
 }
 
 /**
+ * Closed omission-reason vocabulary emitted by computer_visual_observe.
+ * The controller emits mark-budget-exceeded, static-label, and
+ * target_has_no_frame; the native capture additionally emits
+ * target_outside_captured_window and the parameterized stale_target: <detail>
+ * spelling (listed as the base identifier here). Documentation and code are
+ * kept in lockstep by test/documentation.test.mjs.
+ */
+export const COMPUTER_OMITTED_REASON_VOCABULARY = [
+  'mark-budget-exceeded',
+  'static-label',
+  'target_has_no_frame',
+  'target_outside_captured_window',
+  'stale_target',
+] as const
+
+export type ComputerOmittedReason = typeof COMPUTER_OMITTED_REASON_VOCABULARY[number]
+
+/**
  * Driver-level visual result. The PNG remains in process memory for the host
  * attachment service; model-facing tool JSON must project metadata only.
  */

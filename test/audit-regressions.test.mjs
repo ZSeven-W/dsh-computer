@@ -3,6 +3,8 @@
 // Each scenario guards one confirmed defect; the scenarios were added
 // item-by-item alongside their fixes.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { writeFile } from 'node:fs/promises'
 import test from 'node:test'
 import { ComputerController } from '../lib/index.js'
 
@@ -176,4 +178,66 @@ test('evidence re-runs expiry cleanup after a slow status so activeObservations 
   // Observed at 1,000 with a 1,000 ms TTL: expired at 2,000, status finished
   // at 2,001. The count projected after the await must be zero.
   assert.equal(evidence.activeObservations, 0)
+})
+
+function captureResult(request, marks, omitted) {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  return {
+    capturedAt: '2026-09-03T00:00:00.050Z',
+    app: structuredClone(request.capture.app),
+    window: structuredClone(request.capture.window),
+    artifact: { format: 'png', byteLength: png.length, sha256: createHash('sha256').update(png).digest('hex') },
+    pointFrame: structuredClone(request.capture.window.frame),
+    pixelWidth: 900,
+    pixelHeight: 700,
+    scaleX: 1,
+    scaleY: 1,
+    quality: {
+      classification: 'usable', usable: true, sampleCount: 4, visibleFraction: 1,
+      meanLuminance: 0.5, luminanceVariance: 0.1, luminanceRange: 0.8,
+      darkFraction: 0.1, lightFraction: 0.1, distinctColorBuckets: 4,
+    },
+    marks,
+    omitted,
+    png,
+  }
+}
+
+test('frameless interactive targets are target_has_no_frame, not static-label (audit B1/E1)', async () => {
+  const selectedNodes = [node(0), node(1), node(2, { frame: null }), node(3, { role: 'AXStaticText', actions: [] })]
+  const transport = {
+    async request(request) {
+      if (request.command === 'observe') return observation(selectedNodes)
+      const targetEntries = request.capture.targets
+      const marks = targetEntries.slice(1).map((target, index) => ({
+        number: index + 1,
+        ref: target.ref,
+        index: target.index,
+        pixelFrame: { x: 20, y: 20, width: 40, height: 20 },
+      }))
+      const omitted = targetEntries.slice(0, 1).map(target => ({
+        ref: target.ref, index: target.index, reason: 'target_has_no_frame',
+      }))
+      const result = captureResult(request, marks, omitted)
+      await writeFile(request.capture.outputPath, result.png, { mode: 0o600 })
+      delete result.png
+      return result
+    },
+    active: () => 0,
+    async disposeScope() {},
+    async dispose() {},
+  }
+  const controller = new ComputerController({ native: transport, id: ids(), now: () => 1_000, platform: 'darwin' })
+  const seen = await controller.observe({}, { scopeId: 'agent-a' })
+  const capture = await controller.visualObserve({ observationId: seen.observationId, maxMarks: 1 }, { scopeId: 'agent-a' })
+  assert.equal(capture.marks.length + capture.omitted.length, seen.targets.length)
+
+  // Source 2 is an interactive AXButton without a frame: it must keep the
+  // native vocabulary spelling, never the static-label bucket.
+  const noFrameRef = seen.targets[2].ref
+  const noFrame = capture.omitted.find(item => item.ref === noFrameRef)
+  assert.equal(noFrame?.reason, 'target_has_no_frame')
+  const staticRef = seen.targets[3].ref
+  const staticLabel = capture.omitted.find(item => item.ref === staticRef)
+  assert.equal(staticLabel?.reason, 'static-label')
 })

@@ -573,10 +573,14 @@ test('Set-of-Mark omitted reports every unmarked target with the correct reason'
 
   assert.equal(capture.marks.length, 2)
   assert.equal(capture.marks.length + capture.omitted.length, seen.targets.length)
-  const byReason = { 'mark-budget-exceeded': [], 'static-label': [] }
+  const byReason = { 'mark-budget-exceeded': [], 'static-label': [], 'target_has_no_frame': [] }
   for (const omission of capture.omitted) byReason[omission.reason].push(omission.sourceIndex)
   assert.deepEqual(byReason['mark-budget-exceeded'], [2])
-  assert.deepEqual(byReason['static-label'], [3, 4, 5])
+  // A frameless interactive target is an unmarkable ACTION target and keeps
+  // the native vocabulary spelling; only genuinely static content is a
+  // static-label.
+  assert.deepEqual(byReason['target_has_no_frame'], [4])
+  assert.deepEqual(byReason['static-label'], [3, 5])
 })
 
 test('opaque refs are isolated by host-derived Agent scope', async () => {

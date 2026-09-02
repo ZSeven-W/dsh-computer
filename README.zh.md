@@ -104,7 +104,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 })
 ```
 
-当前 `contractVersion` 为 `4`。v3 新增了 `scroll` 动作；v4 让证据对截断保持诚实（`computer_evidence` 现携带 `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`），将观察淘汰改为 TTL 优先而非按数量（TTL 有效的 ref 在后续多次观察后依然可用，因内存上限被淘汰的 ref 会返回 `OBSERVATION_EVICTED` 而非错误的 `unknown reference`），并把每个未标记的 Set-of-Mark 目标都以 `mark-budget-exceeded` 或 `static-label` 原因写入 `omitted`。后续消费者应先判断版本，再依赖新增字段。
+当前 `contractVersion` 为 `4`。v3 新增了 `scroll` 动作；v4 让证据对截断保持诚实（`computer_evidence` 现携带 `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`），将观察淘汰改为 TTL 优先而非按数量（TTL 有效的 ref 在后续多次观察后依然可用，因内存上限被淘汰的 ref 会返回 `OBSERVATION_EVICTED` 而非错误的 `unknown reference`），并把每个未标记的 Set-of-Mark 目标都写入 `omitted`，原因来自同时覆盖 controller 与 native capture 的封闭词汇表。省略原因词汇表：`mark-budget-exceeded`、`static-label`、`target_has_no_frame`、`target_outside_captured_window`、`stale_target: …`。后续消费者应先判断版本，再依赖新增字段。
 
 观察保留还按 Agent 作用域做字节预算（32 MiB 序列化负载）：新观察会超出预算时，先淘汰最旧的 TTL 有效观察——同样以 `OBSERVATION_EVICTED` 报告——且最新一次观察永不被淘汰。
 

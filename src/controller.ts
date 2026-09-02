@@ -9,6 +9,7 @@ import type {
   ComputerHelperStatus,
   ComputerObservation,
   ComputerObserveRequest,
+  ComputerOmittedReason,
   ComputerPostActionObservation,
   ComputerTarget,
   ComputerVisualCapture,
@@ -165,6 +166,26 @@ function markPriority(target: ObservationTargetRecord): number {
   if (node.role === 'AXWindow' || node.role === 'AXApplication') return 1
   if (node.enabled !== false && (node.actions.length > 0 || INTERACTIVE_AX_ROLES.has(node.role))) return 0
   return 1
+}
+
+/**
+ * Controller-side Set-of-Mark omission reason. A frameless INTERACTIVE target
+ * (an action the driver could dispatch if only it had a frame) keeps the
+ * native vocabulary's target_has_no_frame; genuinely non-interactive content
+ * (static labels, window/application containers, disabled nodes) is
+ * static-label. Native capture adds target_outside_captured_window and
+ * stale_target: <detail> to the same closed vocabulary.
+ */
+function omittedTargetReason(
+  target: ObservationTargetRecord,
+): Extract<ComputerOmittedReason, 'target_has_no_frame' | 'static-label'> {
+  const node = target.nativeTarget
+  if (node.frame === null
+    && node.enabled !== false
+    && (node.actions.length > 0 || INTERACTIVE_AX_ROLES.has(node.role))) {
+    return 'target_has_no_frame'
+  }
+  return 'static-label'
 }
 
 function emptyHelperStatus(
@@ -826,7 +847,7 @@ export class ComputerController implements ComputerDriver {
         .sort((left, right) => markPriority(left) - markPriority(right) || left.sourceIndex - right.sourceIndex)
       const selected = markable.slice(0, maxMarks)
       const beyondBudget = markable.slice(maxMarks)
-      const staticLabels = allTargets.filter(
+      const omittedTargets = allTargets.filter(
         target => !(target.nativeTarget.frame !== null && markPriority(target) === 0),
       )
       const targets = selected.map(target => ({
@@ -883,10 +904,10 @@ export class ComputerController implements ComputerDriver {
             sourceIndex: target.sourceIndex,
             reason: 'mark-budget-exceeded',
           })),
-          ...staticLabels.map(target => ({
+          ...omittedTargets.map(target => ({
             ref: target.publicTarget.ref,
             sourceIndex: target.sourceIndex,
-            reason: 'static-label',
+            reason: omittedTargetReason(target),
           })),
         ],
       }
