@@ -153,3 +153,27 @@ test('aggregate observation payload is byte-budgeted and evicts oldest TTL-valid
   assert.equal(recent.status, 'unknown', 'the newest observation stays live and dispatchable')
   assert.equal(recent.nativeAccepted, true)
 })
+
+test('evidence re-runs expiry cleanup after a slow status so activeObservations is current (audit A3)', async () => {
+  let now = 1_000
+  let releaseStatus
+  const statusStarted = new Promise(resolve => { releaseStatus = resolve })
+  const native = basicNative([node(0)])
+  const baseRequest = native.request.bind(native)
+  native.request = async (request, options) => {
+    if (request.command === 'status') {
+      releaseStatus()
+      await new Promise(resolve => setImmediate(resolve))
+      now = 2_001
+    }
+    return baseRequest(request, options)
+  }
+  const controller = new ComputerController({ native, now: () => now, id: ids(), platform: 'darwin' })
+  await controller.observe({ ttlMs: 1_000 }, { scopeId: 'agent-a' })
+  const pending = controller.evidence({ scopeId: 'agent-a' }, { limit: 1 })
+  await statusStarted
+  const evidence = await pending
+  // Observed at 1,000 with a 1,000 ms TTL: expired at 2,000, status finished
+  // at 2,001. The count projected after the await must be zero.
+  assert.equal(evidence.activeObservations, 0)
+})

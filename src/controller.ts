@@ -1336,6 +1336,10 @@ export class ComputerController implements ComputerDriver {
         status = emptyHelperStatus('macos', errorMessage(error))
       }
     }
+    // The awaited native status request can take arbitrarily long: re-run
+    // expiry cleanup so activeObservations reflects the projection instant,
+    // not the instant before the status call began.
+    this.#cleanExpired(state)
     const receipts = state.receipts.slice(-limit).map(receipt => structuredClone(receipt))
     return {
       contractVersion: COMPUTER_DRIVER_CONTRACT_VERSION,
