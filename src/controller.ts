@@ -998,8 +998,9 @@ export class ComputerController implements ComputerDriver {
     const scopeGeneration = this.#scopeGeneration(scope)
 
     // A human's deliberation time must not consume the freshness budget. Record
-    // how long the approval gate held before answering so the post-approval TTL
-    // check can be measured against the pre-approval instant.
+    // how long the approval gate held before answering so every post-approval
+    // TTL checkpoint is measured against the credited deadline
+    // (expiresAtMs + approvalElapsedMs) instead of the raw expiry.
     let approvalElapsedMs = 0
     let approvalRisk: Extract<ComputerActionRisk, { kind: 'approval-required' }> | null = null
 
@@ -1016,13 +1017,15 @@ export class ComputerController implements ComputerDriver {
     const bindingFailure = (): string | null => {
       const hard = hardBindingFailure()
       if (hard !== null) return hard
-      // The freshness budget excludes the approval wait: the TTL is evaluated
-      // against the pre-approval instant (expiresAtMs + approvalElapsedMs). A
-      // stale observation fails closed for the safe path exactly as before; for
-      // a granted approval it is re-verified by the live preflight below instead
-      // of being rejected on the clock alone.
+      // The freshness budget excludes ONLY the approval wait: the TTL is
+      // evaluated against the credited deadline (expiresAtMs +
+      // approvalElapsedMs). The grant never suspends the bound — any time
+      // spent after approval on the window lock, the final preflight, or the
+      // native dispatch counts against the TTL, and a stale observation fails
+      // closed at every checkpoint exactly as the safe path does. The live
+      // preflight still proves a real view change inside that window.
       const stale = observation.expiresAtMs + approvalElapsedMs <= this.#now()
-      if (stale && approvalRisk === null) {
+      if (stale) {
         this.#dropObservation(state, observation)
         return 'observation expired before action dispatch; run computer_observe again'
       }
@@ -1078,9 +1081,9 @@ export class ComputerController implements ComputerDriver {
             reason: approvalDenialReason(outcome, initialRisk), nativeAccepted: false, postAction: null,
           })
         }
-        // A granted approval makes this action approval-bound: the clock can no
-        // longer reject it, only a live re-verification that proves a real
-        // change (or a hard binding failure) can.
+        // A granted approval credits the human's wait time only. The clock can
+        // still reject the action once the credited deadline passes, and a
+        // live re-verification proves a real view change inside that window.
         approvalRisk = initialRisk
         const invalidAfterApproval = bindingFailure()
         if (invalidAfterApproval) {
