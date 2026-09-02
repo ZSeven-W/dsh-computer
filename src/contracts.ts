@@ -1,7 +1,7 @@
 /** Stable service name exposed through Cordis for dsh-qa and other drivers. */
 export const COMPUTER_DRIVER_SERVICE = 'zsevenComputerDriver' as const
 
-export const COMPUTER_DRIVER_CONTRACT_VERSION = 3 as const
+export const COMPUTER_DRIVER_CONTRACT_VERSION = 4 as const
 
 export interface ComputerFrame {
   x: number
@@ -254,6 +254,14 @@ export interface ComputerEvidence {
   activeObservations: number
   activeNativeRequests: number
   receipts: ComputerActionReceipt[]
+  /** Receipts ever recorded in this scope (monotonically increasing). */
+  receipts_total: number
+  /** Receipts evicted from the bounded ring because it exceeded its cap. */
+  receipts_dropped: number
+  /** Receipts actually present in `receipts` (bounded by the requested limit). */
+  receipts_returned: number
+  /** Always true: the receipt ring is bounded; use the counters above to detect truncation. */
+  bounded: true
 }
 
 /** Closed vocabulary returned by DSH's host-owned approval service. */

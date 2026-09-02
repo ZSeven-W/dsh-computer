@@ -104,7 +104,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 })
 ```
 
-当前 `contractVersion` 为 `3`；v3 新增 `scroll` 动作（对包含目标元素的 AX 滚动区域进行原生垂直滚动，返回诚实的 `unknown` 回执）。后续消费者应先判断版本，再依赖新增字段。
+当前 `contractVersion` 为 `4`。v3 新增了 `scroll` 动作；v4 让证据对截断保持诚实（`computer_evidence` 现携带 `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`），将观察淘汰改为 TTL 优先而非按数量（TTL 有效的 ref 在后续多次观察后依然可用，因内存上限被淘汰的 ref 会返回 `OBSERVATION_EVICTED` 而非错误的 `unknown reference`），并把每个未标记的 Set-of-Mark 目标都以 `mark-budget-exceeded` 或 `static-label` 原因写入 `omitted`。后续消费者应先判断版本，再依赖新增字段。
 
 ## 本地安装
 

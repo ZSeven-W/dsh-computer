@@ -461,7 +461,7 @@ test('computer evidence losslessly exposes stable helper, TCC, signing, process,
   const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
   const evidence = await controller.evidence({ scopeId: 'agent-a' })
 
-  assert.equal(evidence.contractVersion, 3)
+  assert.equal(evidence.contractVersion, 4)
   assert.deepEqual(evidence.status, {
     platform: 'macos', helper: 'ready',
     accessibilityTrusted: status.accessibilityTrusted,
@@ -479,6 +479,92 @@ test('computer evidence losslessly exposes stable helper, TCC, signing, process,
     detail: 'native helper fixture; interactive session available; Accessibility trusted; Screen Recording not granted; identity development/unstable',
   })
   assert.doesNotThrow(() => JSON.stringify(evidence))
+})
+
+test('evidence receipts are honestly accounted: total, dropped, returned, bounded', async () => {
+  const native = new FakeNative()
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const oneAct = async () => {
+    const seen = await controller.observe({}, { scopeId: 'agent-a' })
+    return controller.act({ kind: 'click', ref: seen.targets[0].ref }, { scopeId: 'agent-a' })
+  }
+
+  for (let i = 0; i < 25; i += 1) await oneAct()
+  let evidence = await controller.evidence({ scopeId: 'agent-a' })
+  assert.equal(evidence.receipts_total, 25)
+  assert.equal(evidence.receipts_dropped, 0)
+  assert.equal(evidence.receipts_returned, 20, 'default limit is 20')
+  assert.equal(evidence.receipts.length, 20)
+  assert.equal(evidence.bounded, true)
+
+  for (let i = 0; i < 100; i += 1) await oneAct()
+  evidence = await controller.evidence({ scopeId: 'agent-a' }, { limit: 100 })
+  assert.equal(evidence.receipts_total, 125)
+  assert.equal(evidence.receipts_dropped, 25, '125 recorded - 100 ring cap = 25 evicted')
+  assert.equal(evidence.receipts_returned, 100)
+  assert.equal(evidence.receipts.length, 100)
+  assert.equal(evidence.bounded, true)
+})
+
+test('a TTL-valid ref survives 50 later observes and still acts', async () => {
+  const confirmed = {
+    status: 'confirmed', reason: 'click confirmed by post state', accepted: true,
+    post: {
+      capturedAt: '2026-08-24T00:00:00.100Z',
+      app: observation().app,
+      window: observation().window,
+      target: { ...node(), value: 'on' },
+    },
+  }
+  const native = new FakeNative({ actionResult: confirmed })
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const first = await controller.observe({ ttlMs: 30_000 }, { scopeId: 'agent-a' })
+  const firstRef = first.targets[0].ref
+  for (let i = 0; i < 50; i += 1) await controller.observe({ ttlMs: 30_000 }, { scopeId: 'agent-a' })
+  const receipt = await controller.act({ kind: 'click', ref: firstRef }, { scopeId: 'agent-a' })
+  assert.equal(receipt.status, 'confirmed')
+})
+
+test('an observation evicted by the memory ceiling reports OBSERVATION_EVICTED, not unknown reference', async () => {
+  const native = new FakeNative()
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const first = await controller.observe({ ttlMs: 30_000 }, { scopeId: 'agent-a' })
+  const firstRef = first.targets[0].ref
+  for (let i = 0; i < 512; i += 1) await controller.observe({ ttlMs: 30_000 }, { scopeId: 'agent-a' })
+  const receipt = await controller.act({ kind: 'click', ref: firstRef }, { scopeId: 'agent-a' })
+  assert.equal(receipt.status, 'rejected')
+  assert.match(receipt.reason, /OBSERVATION_EVICTED/)
+  assert.doesNotMatch(receipt.reason, /unknown reference/)
+})
+
+test('Set-of-Mark omitted reports every unmarked target with the correct reason', async () => {
+  const nodes = [
+    node({ name: 'Button A', identifier: 'a', locator: [0] }),
+    node({ name: 'Button B', identifier: 'b', locator: [1] }),
+    node({ name: 'Button C', identifier: 'c', locator: [2] }),
+    node({ role: 'AXStaticText', name: 'Label', identifier: 'label', actions: [], locator: [3] }),
+    node({ name: 'Frameless', identifier: 'frameless', frame: null, locator: [4] }),
+    node({ role: 'AXWindow', name: 'Window', identifier: null, actions: ['AXRaise'], locator: [5], depth: 0 }),
+  ]
+  const native = new FakeNative({ observation: observation({ nodes }) })
+  const controller = new ComputerController({
+    native,
+    capture: captureFixture(() => {}),
+    now: () => 1_000,
+    id: ids(),
+    platform: 'darwin',
+  })
+  const seen = await controller.observe({}, { scopeId: 'agent-a' })
+  const capture = await controller.visualObserve(
+    { observationId: seen.observationId, maxMarks: 2 }, { scopeId: 'agent-a' },
+  )
+
+  assert.equal(capture.marks.length, 2)
+  assert.equal(capture.marks.length + capture.omitted.length, seen.targets.length)
+  const byReason = { 'mark-budget-exceeded': [], 'static-label': [] }
+  for (const omission of capture.omitted) byReason[omission.reason].push(omission.sourceIndex)
+  assert.deepEqual(byReason['mark-budget-exceeded'], [2])
+  assert.deepEqual(byReason['static-label'], [3, 4, 5])
 })
 
 test('opaque refs are isolated by host-derived Agent scope', async () => {

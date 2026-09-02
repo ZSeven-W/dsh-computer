@@ -39,8 +39,15 @@ const DEFAULT_MAX_NODES = 200
 const DEFAULT_TTL_MS = 15_000
 const MIN_TTL_MS = 1_000
 const MAX_TTL_MS = 30_000
-const MAX_OBSERVATIONS_PER_SCOPE = 8
+// Observation eviction is TTL-first: #cleanExpired removes expired
+// observations, and this count is only a generous memory ceiling that evicts
+// the OLDEST TTL-valid observation when a scope still exceeds it. A TTL-valid
+// ref therefore survives any realistic settle/poll pattern (>=50 later observes
+// within one TTL) and is only evicted far past this bound with a distinct
+// OBSERVATION_EVICTED receipt instead of a false "unknown reference".
+const MAX_OBSERVATIONS_PER_SCOPE = 512
 const MAX_RECEIPTS_PER_SCOPE = 100
+const MAX_EVICTED_REFS = 16_384
 const MAX_TYPE_LENGTH = 8_192
 const DEFAULT_MAX_MARKS = 80
 const MAX_MARKS = 200
@@ -84,6 +91,9 @@ interface ScopeState {
   refs: Map<string, { observation: ObservationRecord; target: ObservationTargetRecord }>
   receipts: ComputerActionReceipt[]
   sequence: number
+  receiptsDropped: number
+  /** Refs whose observation was evicted by the memory ceiling (not TTL/consumed). */
+  evictedRefs: Set<string>
   busyObservations: Set<string>
 }
 
@@ -579,7 +589,8 @@ export class ComputerController implements ComputerDriver {
     const existing = this.#scopes.get(scope)
     if (existing) return existing
     const created: ScopeState = {
-      observations: new Map(), refs: new Map(), receipts: [], sequence: 0, busyObservations: new Set(),
+      observations: new Map(), refs: new Map(), receipts: [], sequence: 0,
+      receiptsDropped: 0, evictedRefs: new Set(), busyObservations: new Set(),
     }
     this.#scopes.set(scope, created)
     return created
@@ -592,6 +603,17 @@ export class ComputerController implements ComputerDriver {
   #dropObservation(state: ScopeState, observation: ObservationRecord): void {
     state.observations.delete(observation.id)
     for (const ref of observation.targets.keys()) state.refs.delete(ref)
+  }
+
+  /** Count-based memory eviction: record the refs so a later act can say so. */
+  #evictObservation(state: ScopeState, observation: ObservationRecord): void {
+    for (const ref of observation.targets.keys()) state.evictedRefs.add(ref)
+    this.#dropObservation(state, observation)
+    while (state.evictedRefs.size > MAX_EVICTED_REFS) {
+      const oldest = state.evictedRefs.values().next().value
+      if (oldest === undefined) break
+      state.evictedRefs.delete(oldest)
+    }
   }
 
   #cleanExpired(state: ScopeState): void {
@@ -636,7 +658,7 @@ export class ComputerController implements ComputerDriver {
     while (state.observations.size >= MAX_OBSERVATIONS_PER_SCOPE) {
       const oldest = state.observations.values().next().value as ObservationRecord | undefined
       if (!oldest) break
-      this.#dropObservation(state, oldest)
+      this.#evictObservation(state, oldest)
     }
 
     const observedAtMs = this.#now()
@@ -725,19 +747,24 @@ export class ComputerController implements ComputerDriver {
       releaseWindow = await this.#windowMutex.acquire(windowLockKey(observation), scope, context.signal)
       const beforeCapture = bindingFailure()
       if (beforeCapture !== null) throw new Error(beforeCapture)
-      const targets = [...observation.targets.values()]
-        // SoM is an action map, not an Accessibility debug overlay. Static
-        // labels remain visible in the screenshot/AX JSON but do not receive
-        // opaque action numbers that the driver could never safely dispatch.
+      const allTargets = [...observation.targets.values()]
+      // SoM is an action map, not an Accessibility debug overlay. Static
+      // labels remain visible in the screenshot/AX JSON but do not receive
+      // opaque action numbers that the driver could never safely dispatch.
+      const markable = allTargets
         .filter(target => target.nativeTarget.frame !== null && markPriority(target) === 0)
         .sort((left, right) => markPriority(left) - markPriority(right) || left.sourceIndex - right.sourceIndex)
-        .slice(0, maxMarks)
-        .map(target => ({
-          ref: target.publicTarget.ref,
-          index: target.sourceIndex,
-          element: nativeElement(target.publicTarget),
-          locator: [...target.nativeTarget.locator],
-        }))
+      const selected = markable.slice(0, maxMarks)
+      const beyondBudget = markable.slice(maxMarks)
+      const staticLabels = allTargets.filter(
+        target => !(target.nativeTarget.frame !== null && markPriority(target) === 0),
+      )
+      const targets = selected.map(target => ({
+        ref: target.publicTarget.ref,
+        index: target.sourceIndex,
+        element: nativeElement(target.publicTarget),
+        locator: [...target.nativeTarget.locator],
+      }))
       const captured = await this.#capture(this.#native, {
         id: this.#id(),
         capture: {
@@ -775,11 +802,23 @@ export class ComputerController implements ComputerDriver {
           sourceIndex: mark.index,
           nativePixelFrame: { ...mark.pixelFrame },
         })),
-        omitted: captured.result.omitted.map(omission => ({
-          ref: omission.ref,
-          sourceIndex: omission.index,
-          reason: omission.reason,
-        })),
+        omitted: [
+          ...captured.result.omitted.map(omission => ({
+            ref: omission.ref,
+            sourceIndex: omission.index,
+            reason: omission.reason,
+          })),
+          ...beyondBudget.map(target => ({
+            ref: target.publicTarget.ref,
+            sourceIndex: target.sourceIndex,
+            reason: 'mark-budget-exceeded',
+          })),
+          ...staticLabels.map(target => ({
+            ref: target.publicTarget.ref,
+            sourceIndex: target.sourceIndex,
+            reason: 'static-label',
+          })),
+        ],
       }
     } finally {
       releaseWindow?.()
@@ -866,7 +905,10 @@ export class ComputerController implements ComputerDriver {
     }
     const storedReceipt = structuredClone(receipt)
     state.receipts.push(storedReceipt)
-    if (state.receipts.length > MAX_RECEIPTS_PER_SCOPE) state.receipts.splice(0, state.receipts.length - MAX_RECEIPTS_PER_SCOPE)
+    if (state.receipts.length > MAX_RECEIPTS_PER_SCOPE) {
+      state.receiptsDropped += state.receipts.length - MAX_RECEIPTS_PER_SCOPE
+      state.receipts.splice(0, state.receipts.length - MAX_RECEIPTS_PER_SCOPE)
+    }
     return structuredClone(storedReceipt)
   }
 
@@ -884,9 +926,12 @@ export class ComputerController implements ComputerDriver {
     }
     const located = state.refs.get(action.ref)
     if (!located) {
+      const evicted = state.evictedRefs.has(action.ref)
       return this.#receipt(state, {
         status: 'rejected', action, observation: null, startedAt,
-        reason: 'unknown reference in this Agent scope; run computer_observe again',
+        reason: evicted
+          ? 'OBSERVATION_EVICTED: observation was evicted by driver memory bounds before its ref expired; run computer_observe again'
+          : 'unknown reference in this Agent scope; run computer_observe again',
         nativeAccepted: false, postAction: null,
       })
     }
@@ -1217,13 +1262,18 @@ export class ComputerController implements ComputerDriver {
         status = emptyHelperStatus('macos', errorMessage(error))
       }
     }
+    const receipts = state.receipts.slice(-limit).map(receipt => structuredClone(receipt))
     return {
       contractVersion: COMPUTER_DRIVER_CONTRACT_VERSION,
       scope: scopeLabel(scope),
       status,
       activeObservations: state.observations.size,
       activeNativeRequests: this.#native.active(scope),
-      receipts: state.receipts.slice(-limit).map(receipt => structuredClone(receipt)),
+      receipts,
+      receipts_total: state.sequence,
+      receipts_dropped: state.receiptsDropped,
+      receipts_returned: receipts.length,
+      bounded: true,
     }
   }
 

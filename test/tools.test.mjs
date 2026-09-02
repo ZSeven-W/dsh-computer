@@ -5,7 +5,7 @@ import { app, windowIdentity } from './fixtures.mjs'
 
 function driver() {
   return {
-    kind: 'computer', platform: 'macos', contractVersion: 3,
+    kind: 'computer', platform: 'macos', contractVersion: 4,
     async observe() { throw new Error('not reached') },
     async visualObserve() { throw new Error('not reached') },
     async act() { throw new Error('not reached') },

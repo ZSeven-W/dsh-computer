@@ -173,7 +173,7 @@ const receiptSchema: JsonSchema = {
 const evidenceSchema: JsonSchema = {
   type: 'object', additionalProperties: false,
   properties: {
-    contractVersion: { type: 'integer', const: 3 }, scope: { type: 'string' },
+    contractVersion: { type: 'integer', const: 4 }, scope: { type: 'string' },
     status: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -235,8 +235,13 @@ const evidenceSchema: JsonSchema = {
     },
     activeObservations: { type: 'integer' }, activeNativeRequests: { type: 'integer' },
     receipts: { type: 'array', items: receiptSchema },
+    receipts_total: { type: 'integer' }, receipts_dropped: { type: 'integer' },
+    receipts_returned: { type: 'integer' }, bounded: { type: 'boolean', const: true },
   },
-  required: ['contractVersion', 'scope', 'status', 'activeObservations', 'activeNativeRequests', 'receipts'],
+  required: [
+    'contractVersion', 'scope', 'status', 'activeObservations', 'activeNativeRequests',
+    'receipts', 'receipts_total', 'receipts_dropped', 'receipts_returned', 'bounded',
+  ],
 }
 
 const imageRefSchema: JsonSchema = {
@@ -579,7 +584,9 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
   const computerEvidence: StructuralToolDefinition = {
     name: 'computer_evidence',
     description: 'Report helper/Accessibility readiness plus recent evidence receipts for this Agent only. Receipts distinguish confirmed, '
-      + 'unknown, rejected and failed outcomes; no raw Agent id or actionable native locator is exposed.',
+      + 'unknown, rejected and failed outcomes; no raw Agent id or actionable native locator is exposed. The receipt ring is bounded: '
+      + 'receipts_total is every receipt ever recorded in this scope, receipts_dropped is how many were evicted from the ring, '
+      + 'receipts_returned is how many this call actually returned (bounded by limit), and bounded is always true.',
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {

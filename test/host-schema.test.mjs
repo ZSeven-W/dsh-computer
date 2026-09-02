@@ -37,7 +37,7 @@ test('definitions pass the current DSH schema validator and raw ToolRuntime exec
     ToolRuntime, assertObjectJsonSchema, assertSupportedJsonSchema,
   } = await import(modulePath('dsh-tools'))
   const inertDriver = {
-    kind: 'computer', platform: 'macos', contractVersion: 3,
+    kind: 'computer', platform: 'macos', contractVersion: 4,
     async observe() {}, async visualObserve() {}, async act() {}, async evidence() {}, async disposeScope() {}, async dispose() {},
   }
   const tools = createComputerTools(inertDriver)
@@ -50,7 +50,7 @@ test('definitions pass the current DSH schema validator and raw ToolRuntime exec
     ...inertDriver,
     async evidence() {
       return {
-        contractVersion: 3,
+        contractVersion: 4,
         scope: 'runtime-scope',
         status: {
           platform: 'macos', helper: 'unavailable', accessibilityTrusted: null,
@@ -61,6 +61,10 @@ test('definitions pass the current DSH schema validator and raw ToolRuntime exec
         activeObservations: 0,
         activeNativeRequests: 0,
         receipts: [],
+        receipts_total: 0,
+        receipts_dropped: 0,
+        receipts_returned: 0,
+        bounded: true,
       }
     },
   }
@@ -76,7 +80,7 @@ test('definitions pass the current DSH schema validator and raw ToolRuntime exec
   }
   const valid = await ctx.tools.execute({ ...execution, arguments: {} })
   assert.equal(valid.isError, false)
-  assert.equal(valid.value.contractVersion, 3)
+  assert.equal(valid.value.contractVersion, 4)
 
   const extra = await ctx.tools.execute({ ...execution, callId: 'call-runtime-extra', arguments: { approved: true } })
   assert.equal(extra.isError, true, 'ToolRuntime must surface the executor\'s exact-key refusal')

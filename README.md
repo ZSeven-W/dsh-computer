@@ -105,7 +105,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 })
 ```
 
-`contractVersion` is currently `3`; v3 adds the `scroll` action (AX-native vertical scrolling of the containing scroll area with honest `unknown` receipts). Consumers must branch on that value before relying on later fields.
+`contractVersion` is currently `4`. v3 added the `scroll` action; v4 makes evidence honest about truncation (`computer_evidence` now carries `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`), makes observation eviction TTL-first rather than count-based (a TTL-valid ref survives later observes, and a ref evicted by the memory ceiling reports `OBSERVATION_EVICTED` instead of a false `unknown reference`), and reports every unmarked Set-of-Mark target in `omitted` with a `mark-budget-exceeded` or `static-label` reason. Consumers must branch on that value before relying on later fields.
 
 ## Local install
 
