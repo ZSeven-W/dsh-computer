@@ -556,6 +556,18 @@ private func elementAttribute(_ element: AXUIElement, _ name: CFString) -> AXUIE
     return unsafeDowncast(value, to: AXUIElement.self)
 }
 
+/// Children read with completeness semantics for the observation walk. A
+/// failed attribute call, a clamped array, or a non-AX array entry is an
+/// incomplete read: nodes may exist that were not emitted, and the walk must
+/// surface truncated instead of silently reporting an absence.
+private func readChildren(_ element: AXUIElement) -> ChildrenRead {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else {
+        return ChildrenRead(elements: [], complete: false)
+    }
+    return ChildrenRead.from(raw: value, ceiling: maxChildrenPerNode)
+}
+
 private func elementArrayAttribute(_ element: AXUIElement, _ name: CFString) -> [AXUIElement] {
     guard let value = attribute(element, name), CFGetTypeID(value) == CFArrayGetTypeID() else { return [] }
     let array = value as! CFArray
@@ -814,36 +826,19 @@ private func observe(_ request: Request) throws -> ObserveResult {
     let resolved = try resolveTarget(selector: request.app, windowSelector: request.window)
     let maxDepth = min(8, max(1, request.maxDepth ?? 4))
     let maxNodes = min(500, max(1, request.maxNodes ?? 200))
-    var queue: [(AXUIElement, [Int], Int)] = [(resolved.windowElement, [], 0)]
-    var index = 0
-    var nodes: [ObservedNode] = []
-    var seen = Set<CFHashCode>()
-    var truncated = false
-
-    while index < queue.count && nodes.count < maxNodes {
-        let (element, locator, depth) = queue[index]
-        index += 1
-        let hash = CFHash(element)
-        if seen.contains(hash) { continue }
-        seen.insert(hash)
-        nodes.append(observedNode(element, locator: locator, depth: depth))
-        if depth >= maxDepth { continue }
-        let children = elementArrayAttribute(element, kAXChildrenAttribute as CFString)
-        for (childIndex, child) in children.enumerated() {
-            if queue.count >= maxNodes * 2 {
-                truncated = true
-                break
-            }
-            queue.append((child, locator + [childIndex], depth + 1))
-        }
-    }
-    if index < queue.count { truncated = true }
+    let walk = ObservationWalk(
+        maxDepth: maxDepth,
+        maxNodes: maxNodes,
+        children: { readChildren($0) }
+    )
+    let walked = walk.walk(window: resolved.windowElement)
     // Do not return an Accessibility snapshot if the desktop locked while the
     // bounded traversal was in flight.
     try requireInteractiveSession()
     return ObserveResult(
         capturedAt: timestamp(), app: resolved.appIdentity, window: resolved.windowIdentity,
-        nodes: nodes, truncated: truncated
+        nodes: walked.visited.map { observedNode($0.element, locator: $0.locator, depth: $0.depth) },
+        truncated: walked.truncated
     )
 }
 

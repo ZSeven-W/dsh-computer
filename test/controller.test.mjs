@@ -75,6 +75,18 @@ test('observation returns opaque refs and never exposes native locator', async (
   assert.deepEqual(native.requests[0].request.maxNodes, 200)
 })
 
+test('observe passes the native truncated flag through unchanged', async () => {
+  const truncatedNative = new FakeNative({ observation: observation({ truncated: true }) })
+  const controller = new ComputerController({ native: truncatedNative, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const seen = await controller.observe({}, { scopeId: 'agent-a' })
+  assert.equal(seen.truncated, true, 'a truncated native observation must stay truncated at the contract edge')
+
+  const completeNative = new FakeNative({ observation: observation({ truncated: false }) })
+  const plain = new ComputerController({ native: completeNative, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const complete = await plain.observe({}, { scopeId: 'agent-b' })
+  assert.equal(complete.truncated, false, 'a complete native observation must not be re-labeled truncated')
+})
+
 test('observe snapshots nested input before await and public mutations cannot corrupt internal capabilities or evidence', async () => {
   let releaseObserve
   let capturedRequest
