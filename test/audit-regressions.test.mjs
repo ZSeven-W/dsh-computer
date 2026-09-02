@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import test from 'node:test'
 import { ComputerController } from '../lib/index.js'
+import { captureNativeWindow, NativeCaptureArtifactError } from '../lib/capture-native.js'
+import { tmpdir } from 'node:os'
 
 const app = {
   bundleId: 'dev.audit.fixture',
@@ -240,4 +242,133 @@ test('frameless interactive targets are target_has_no_frame, not static-label (a
   const staticRef = seen.targets[3].ref
   const staticLabel = capture.omitted.find(item => item.ref === staticRef)
   assert.equal(staticLabel?.reason, 'static-label')
+})
+
+test('mark budget clamps: maxMarks 0, 1, and 999 reach the capture seam as 1, 1, 200 (audit F)', async () => {
+  const nodes = Array.from({ length: 205 }, (_, index) => node(index))
+  const requestedCounts = []
+  const controller = new ComputerController({
+    native: basicNative(nodes),
+    id: ids(),
+    now: () => 1_000,
+    platform: 'darwin',
+    capture: async (_native, request) => {
+      requestedCounts.push(request.capture.targets.length)
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+      return {
+        png,
+        result: {
+          capturedAt: '2026-09-03T00:00:00.050Z', app, window,
+          artifact: { format: 'png', byteLength: 4, sha256: 'a'.repeat(64) },
+          pointFrame: window.frame, pixelWidth: 900, pixelHeight: 700, scaleX: 1, scaleY: 1,
+          quality: {
+            classification: 'usable', usable: true, sampleCount: 4, visibleFraction: 1,
+            meanLuminance: 0.5, luminanceVariance: 0.1, luminanceRange: 0.8,
+            darkFraction: 0.1, lightFraction: 0.1, distinctColorBuckets: 4,
+          },
+          marks: request.capture.targets.map((target, index) => ({
+            number: index + 1, ref: target.ref, index: target.index,
+            pixelFrame: { x: 20, y: 20, width: 40, height: 20 },
+          })),
+          omitted: [],
+        },
+      }
+    },
+  })
+  const seen = await controller.observe({ maxNodes: 205 }, { scopeId: 'agent-a' })
+  await controller.visualObserve({ observationId: seen.observationId, maxMarks: 0 }, { scopeId: 'agent-a' })
+  await controller.visualObserve({ observationId: seen.observationId, maxMarks: 1 }, { scopeId: 'agent-a' })
+  await controller.visualObserve({ observationId: seen.observationId, maxMarks: 999 }, { scopeId: 'agent-a' })
+  assert.deepEqual(requestedCounts, [1, 1, 200], 'maxMarks 0 must clamp to 1, never to zero')
+})
+
+test('scope disposal during approval fences native dispatch (audit F)', async () => {
+  let approvalStarted
+  let releaseApproval
+  const started = new Promise(resolve => { approvalStarted = resolve })
+  const native = basicNative([node(0, { name: 'Delete account', identifier: 'delete' })])
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const seen = await controller.observe({}, { scopeId: 'agent-a' })
+  const pending = controller.act(
+    { kind: 'click', ref: seen.targets[0].ref },
+    {
+      scopeId: 'agent-a',
+      approval: {
+        request() {
+          approvalStarted()
+          return new Promise(resolve => { releaseApproval = resolve })
+        },
+      },
+    },
+  )
+  await started
+  const disposal = controller.disposeScope('agent-a')
+  releaseApproval('allowed-once')
+  const receipt = await pending
+  await disposal
+  assert.equal(receipt.status, 'rejected')
+  assert.match(receipt.reason, /disposed before action dispatch/u)
+  assert.equal(receipt.nativeAccepted, false)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
+})
+
+test('scope disposal during the final preflight fences native dispatch (audit F)', async () => {
+  let releasePreflight
+  const preflightStarted = new Promise(resolve => { releasePreflight = resolve })
+  let observeCount = 0
+  const native = basicNative([node(0, { name: 'Delete account', identifier: 'delete' })], async request => {
+    if (request.command === 'observe') {
+      observeCount += 1
+      if (observeCount === 3) {
+        releasePreflight()
+        await new Promise(resolve => setImmediate(resolve))
+      }
+    }
+  })
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const seen = await controller.observe({}, { scopeId: 'agent-a' })
+  const pending = controller.act(
+    { kind: 'click', ref: seen.targets[0].ref },
+    { scopeId: 'agent-a', approval: { async request() { return 'allowed-once' } } },
+  )
+  await preflightStarted
+  await controller.disposeScope('agent-a')
+  const receipt = await pending
+  assert.equal(receipt.status, 'rejected')
+  assert.match(receipt.reason, /disposed before action dispatch/u)
+  assert.equal(receipt.nativeAccepted, false)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
+})
+
+test('native duplicate Set-of-Mark refs are rejected as invalid capture metadata (audit F)', async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const result = captureResult(
+    { capture: { app, window, targets: [{ ref: 'r', index: 0 }] } },
+    [
+      { number: 1, ref: 'r', index: 0, pixelFrame: { x: 1, y: 1, width: 2, height: 2 } },
+      { number: 2, ref: 'r', index: 0, pixelFrame: { x: 2, y: 2, width: 2, height: 2 } },
+    ],
+    [],
+  )
+  const transport = {
+    async request(request) {
+      await writeFile(request.capture.outputPath, png, { mode: 0o600 })
+      return { ...result, artifact: { ...result.artifact, byteLength: png.length, sha256: createHash('sha256').update(png).digest('hex') } }
+    },
+    active: () => 0,
+    async disposeScope() {},
+    async dispose() {},
+  }
+  let rejected = false
+  try {
+    await captureNativeWindow(transport, {
+      id: 'duplicate',
+      capture: { app, window, targets: [{ ref: 'r', index: 0, element: node(0), locator: [0] }] },
+    }, { scopeId: 'agent-a' }, { temporaryRoot: tmpdir() })
+  } catch (error) {
+    assert.ok(error instanceof NativeCaptureArtifactError)
+    rejected = true
+    assert.equal(error.code, 'invalid_capture_metadata')
+  }
+  assert.equal(rejected, true)
 })

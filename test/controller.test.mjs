@@ -518,6 +518,49 @@ test('evidence receipts are honestly accounted: total, dropped, returned, bounde
   assert.equal(evidence.bounded, true)
 })
 
+test('rejected, stale, and helper-failure paths all record their receipt', async t => {
+  await t.test('rejected unknown ref', async () => {
+    const native = new FakeNative()
+    const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+    const receipt = await controller.act({ kind: 'click', ref: 'cu_bogus' }, { scopeId: 'agent-a' })
+    assert.equal(receipt.status, 'rejected')
+    const evidence = await controller.evidence({ scopeId: 'agent-a' })
+    assert.equal(evidence.receipts_total, 1)
+    assert.equal(evidence.receipts[0].status, 'rejected')
+    assert.match(evidence.receipts[0].reason, /unknown reference/)
+    assert.equal(evidence.receipts[0].nativeAccepted, false)
+  })
+
+  await t.test('stale observation', async () => {
+    let now = 1_000
+    const native = new FakeNative()
+    const controller = new ComputerController({ native, now: () => now, id: ids(), platform: 'darwin' })
+    const seen = await controller.observe({ ttlMs: 1_000 }, { scopeId: 'agent-a' })
+    now = 2_001
+    const receipt = await controller.act({ kind: 'click', ref: seen.targets[0].ref }, { scopeId: 'agent-a' })
+    assert.equal(receipt.status, 'rejected')
+    const evidence = await controller.evidence({ scopeId: 'agent-a' })
+    assert.equal(evidence.receipts_total, 1)
+    assert.match(evidence.receipts[0].reason, /stale observation/)
+    assert.equal(evidence.receipts[0].nativeAccepted, false)
+  })
+
+  await t.test('proved helper failure', async () => {
+    const native = new FakeNative({
+      actionError: new NativeHelperError('helper_unavailable', 'binary missing', false),
+    })
+    const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+    const seen = await controller.observe({}, { scopeId: 'agent-a' })
+    const receipt = await controller.act({ kind: 'focus', ref: seen.targets[0].ref }, { scopeId: 'agent-a' })
+    assert.equal(receipt.status, 'failed')
+    const evidence = await controller.evidence({ scopeId: 'agent-a' })
+    assert.equal(evidence.receipts_total, 1)
+    assert.equal(evidence.receipts[0].status, 'failed')
+    assert.match(evidence.receipts[0].reason, /binary missing/)
+    assert.equal(evidence.receipts[0].nativeAccepted, false)
+  })
+})
+
 test('a TTL-valid ref survives 50 later observes and still acts', async () => {
   const confirmed = {
     status: 'confirmed', reason: 'click confirmed by post state', accepted: true,
