@@ -110,3 +110,21 @@ test('post-approval time past the credited deadline rejects before native dispat
   assert.equal(receipt.nativeAccepted, false)
   assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0, 'native act must never be dispatched')
 })
+
+test('a TTL-valid ref evicted by tombstone overflow still reports OBSERVATION_EVICTED (audit A1)', async () => {
+  const nodes = Array.from({ length: 500 }, (_, index) => node(index))
+  const native = basicNative(nodes)
+  const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
+  const first = await controller.observe({ ttlMs: 30_000, maxNodes: 500 }, { scopeId: 'agent-a' })
+  // 600 observations of 500 nodes each: the old per-ref FIFO (16,384 refs)
+  // aged out the first observation's tombstones after 33 count evictions of
+  // 500 refs and reported a false unknown reference.
+  for (let index = 0; index < 599; index += 1) {
+    await controller.observe({ ttlMs: 30_000, maxNodes: 500 }, { scopeId: 'agent-a' })
+  }
+  const receipt = await controller.act({ kind: 'click', ref: first.targets[0].ref }, { scopeId: 'agent-a' })
+  assert.equal(receipt.status, 'rejected')
+  assert.match(receipt.reason, /OBSERVATION_EVICTED/)
+  assert.doesNotMatch(receipt.reason, /unknown reference/)
+  assert.equal(native.requests.filter(entry => entry.request.command === 'act').length, 0)
+})

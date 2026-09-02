@@ -47,7 +47,10 @@ const MAX_TTL_MS = 30_000
 // OBSERVATION_EVICTED receipt instead of a false "unknown reference".
 const MAX_OBSERVATIONS_PER_SCOPE = 512
 const MAX_RECEIPTS_PER_SCOPE = 100
-const MAX_EVICTED_REFS = 16_384
+// One tombstone entry per evicted OBSERVATION (refs carry their observation's
+// token, see refObservationToken), so 600 observations of 500 nodes each
+// cannot overflow the diagnostic set the way a per-ref FIFO did.
+const MAX_EVICTED_OBSERVATIONS = 16_384
 const MAX_TYPE_LENGTH = 8_192
 const DEFAULT_MAX_MARKS = 80
 const MAX_MARKS = 200
@@ -77,6 +80,10 @@ interface ObservationTargetRecord {
 
 interface ObservationRecord {
   id: string
+  /** Per-observation random token embedded in every minted ref so an evicted
+   * ref can be attributed to its observation through the bounded tombstone
+   * set (see refObservationToken). */
+  refToken: string
   fingerprint: string
   capturedAt: string
   expiresAtMs: number
@@ -92,8 +99,8 @@ interface ScopeState {
   receipts: ComputerActionReceipt[]
   sequence: number
   receiptsDropped: number
-  /** Refs whose observation was evicted by the memory ceiling (not TTL/consumed). */
-  evictedRefs: Set<string>
+  /** Observation tokens whose refs were evicted by the memory bounds (not TTL/consumed). */
+  evictedObservations: Set<string>
   busyObservations: Set<string>
 }
 
@@ -121,6 +128,24 @@ function scopeId(context: ComputerDriverContext): string {
 
 function scopeLabel(scope: string): string {
   return createHash('sha256').update(scope).digest('hex').slice(0, 12)
+}
+
+/**
+ * Refs are minted as cu_<observation-token>_<sourceIndex>; this parse
+ * recovers the observation token from a ref that is no longer live, so the
+ * bounded per-observation tombstone set can say OBSERVATION_EVICTED instead
+ * of degrading to a plain unknown reference. Returns null for any ref that
+ * is not in the minted shape.
+ */
+function refObservationToken(ref: string): string | null {
+  if (!ref.startsWith('cu_')) return null
+  const separator = ref.lastIndexOf('_')
+  if (separator <= 3 || separator === ref.length - 1) return null
+  const token = ref.slice(3, separator)
+  const index = ref.slice(separator + 1)
+  if (!/^\d{1,4}$/u.test(index)) return null
+  if (!/^[A-Za-z0-9_-]{8,64}$/u.test(token)) return null
+  return token
 }
 
 function markPriority(target: ObservationTargetRecord): number {
@@ -590,7 +615,7 @@ export class ComputerController implements ComputerDriver {
     if (existing) return existing
     const created: ScopeState = {
       observations: new Map(), refs: new Map(), receipts: [], sequence: 0,
-      receiptsDropped: 0, evictedRefs: new Set(), busyObservations: new Set(),
+      receiptsDropped: 0, evictedObservations: new Set(), busyObservations: new Set(),
     }
     this.#scopes.set(scope, created)
     return created
@@ -605,14 +630,16 @@ export class ComputerController implements ComputerDriver {
     for (const ref of observation.targets.keys()) state.refs.delete(ref)
   }
 
-  /** Count-based memory eviction: record the refs so a later act can say so. */
+  /** Memory eviction: one tombstone per observation, so a later act on any
+   * of its refs can still report OBSERVATION_EVICTED instead of a false
+   * unknown reference. */
   #evictObservation(state: ScopeState, observation: ObservationRecord): void {
-    for (const ref of observation.targets.keys()) state.evictedRefs.add(ref)
+    state.evictedObservations.add(observation.refToken)
     this.#dropObservation(state, observation)
-    while (state.evictedRefs.size > MAX_EVICTED_REFS) {
-      const oldest = state.evictedRefs.values().next().value
+    while (state.evictedObservations.size > MAX_EVICTED_OBSERVATIONS) {
+      const oldest = state.evictedObservations.values().next().value
       if (oldest === undefined) break
-      state.evictedRefs.delete(oldest)
+      state.evictedObservations.delete(oldest)
     }
   }
 
@@ -666,6 +693,7 @@ export class ComputerController implements ComputerDriver {
     const expiresAtMs = observedAtMs + ttlMs
     const record: ObservationRecord = {
       id,
+      refToken: randomBytes(12).toString('base64url'),
       fingerprint: fingerprint(result),
       capturedAt: result.capturedAt,
       expiresAtMs,
@@ -675,7 +703,12 @@ export class ComputerController implements ComputerDriver {
       limits: { maxDepth, maxNodes },
     }
     for (const [sourceIndex, node] of result.nodes.entries()) {
-      const ref = `cu_${randomBytes(18).toString('base64url')}`
+      // Refs carry their observation token (cu_<token>_<index>) so the
+      // bounded per-observation tombstone set can attribute an evicted ref
+      // back to its observation without storing one tombstone per ref. The
+      // 96-bit token keeps every ref unguessable; live refs resolve through
+      // state.refs, the token is only parsed for absent refs.
+      const ref = `cu_${record.refToken}_${sourceIndex}`
       const target: ObservationTargetRecord = { publicTarget: publicTarget(ref, node), nativeTarget: node, sourceIndex }
       record.targets.set(ref, target)
       state.refs.set(ref, { observation: record, target })
@@ -926,7 +959,8 @@ export class ComputerController implements ComputerDriver {
     }
     const located = state.refs.get(action.ref)
     if (!located) {
-      const evicted = state.evictedRefs.has(action.ref)
+      const token = refObservationToken(action.ref)
+      const evicted = token !== null && state.evictedObservations.has(token)
       return this.#receipt(state, {
         status: 'rejected', action, observation: null, startedAt,
         reason: evicted
