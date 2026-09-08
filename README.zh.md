@@ -52,7 +52,7 @@ computer_act
   + 可获得时附动作后观察
 ```
 
-首个纵向切片刻意不做设置面板，只提供 4 个 headless 工具，以及一套供 `dsh-qa` 复用的 Cordis Driver 服务。
+首个纵向切片刻意不做设置面板，只提供 5 个 headless 工具，以及一套供 `dsh-qa` 复用的 Cordis Driver 服务。
 
 ## 工具
 
@@ -60,12 +60,15 @@ computer_act
 | --- | --- |
 | `computer_observe` | 有界读取一个 macOS App/窗口的 Accessibility 树，返回 opaque ref、指纹和过期时间。 |
 | `computer_visual_observe` | 只截取新鲜 observation 绑定的明确编号窗口，做像素校验，把有界 AX Set-of-Mark 编号烙入图片，再通过 DSH 附件交给当前这一路支持图片的模型。 |
+| `computer_visual_act` | 对同一份截图的附件图像像素执行 `click`、`drag` 或 `scroll`；必须先经宿主批准，工具只用受信任的附件几何信息把附件像素换算成原生像素，不接受模型提供的缩放或原生坐标。 |
 | `computer_act` | 对一个新鲜 ref 执行安全的 `click`、`focus`、`type` 或 `key`；每次动作前都重新核验身份。 |
-| `computer_evidence` | 返回交互会话、Accessibility 与录屏就绪状态，Helper executable/bundle/signing/process/caller/resolution 身份，以及当前 Agent 自己的近期回执。 |
+| `computer_evidence` | 返回交互会话、Accessibility 与录屏就绪状态，Helper executable/bundle/signing/process/caller/resolution 身份，以及当前 Agent 自己的近期 AX/视觉动作回执。 |
 
 模型参数里没有 Agent id、AX path、PID lease，也没有让模型自己决定的 `sensitive` 开关。实时 Agent 身份由宿主提供；原始 AX 定位路径不会离开 Driver。
 
 `computer_visual_observe` 只接受 `observation_id` 和可选 `max_marks`（1–200，默认 80），不接受 path、App、窗口、坐标、动作 ref 或审批参数。任何截图发生前都会精确检查 request header 对应的 provider/model route；附件/LLM 服务缺失、route 未知或文本模型都会明确失败，而且不会影响 `computer_observe`。工具 JSON 只包含持久附件元数据、原生/附件尺寸与缩放、编号 → opaque ref/source index 映射，不含路径、base64 或截图 byte buffer。DSH 即使规范化或缩小附件，编号也已经烙在图里。
+
+`computer_visual_act` 接受 `op`、`observation_id`、`capture_sha256`、`point`；`op=drag` 另需 `to`，`op=scroll` 另需 `direction`/`amount`。`point`/`to` 是模型看到的交付附件图像像素。工具只使用 `computer_visual_observe` 保存的受信任附件几何信息换算原生像素，不接受调用方传入的缩放或原生坐标，也不接受 App、窗口、路径、ref、审批、Agent id 或任何图像理解结果作为模型参数。每个视觉动作都按 AX-opaque 未知目标处理，因此一律要求宿主审批，并在审批前后重新截图/核验，派发后回执为 `unknown`——不会 `confirmed`，也不应盲目重试。
 
 ## 安全与结果语义
 
@@ -104,7 +107,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 })
 ```
 
-当前 `contractVersion` 为 `4`。v3 新增了 `scroll` 动作；v4 让证据对截断保持诚实（`computer_evidence` 现携带 `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`），将观察淘汰改为 TTL 优先而非按数量（TTL 有效的 ref 在后续多次观察后依然可用，因内存上限被淘汰的 ref 会返回 `OBSERVATION_EVICTED` 而非错误的 `unknown reference`），并把每个未标记的 Set-of-Mark 目标都写入 `omitted`，原因来自同时覆盖 controller 与 native capture 的封闭词汇表。省略原因词汇表：`mark-budget-exceeded`、`static-label`、`target_has_no_frame`、`target_outside_captured_window`、`stale_target: …`。后续消费者应先判断版本，再依赖新增字段。
+当前 `contractVersion` 为 `5`。v3 新增了 `scroll` 动作；v4 让证据对截断保持诚实（`computer_evidence` 现携带 `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`），将观察淘汰改为 TTL 优先而非按数量，并把每个未标记的 Set-of-Mark 目标都写入 `omitted`。v5 新增面向 AX-opaque 自定义控件的坐标回退 `computer_visual_act`：`computer_visual_observe` 会保存按 PNG SHA-256 绑定的截图几何信息，DSH 工具用受信任的附件几何把附件像素换算成原生像素，Driver 在要求宿主审批前后都会重新截图并核验同一窗口，然后才派发 `click`/`drag`/`scroll`。视觉派发回执一律是 `unknown`，绝不写成 `confirmed`；消费者应重新观察来判断效果，且不得盲目重试 `unknown`。Evidence 现在从同一个有界回执环返回类型化的 AX/视觉回执联合，视觉动作不会从 `computer_evidence` 中消失。省略原因词汇表：`mark-budget-exceeded`、`static-label`、`target_has_no_frame`、`target_outside_captured_window`、`stale_target: …`。后续消费者应先判断版本，再依赖新增字段。
 
 观察保留还按 Agent 作用域做字节预算（32 MiB 序列化负载）：新观察会超出预算时，先淘汰最旧的 TTL 有效观察——同样以 `OBSERVATION_EVICTED` 报告——且最新一次观察永不被淘汰。
 

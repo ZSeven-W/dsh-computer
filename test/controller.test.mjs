@@ -473,7 +473,7 @@ test('computer evidence losslessly exposes stable helper, TCC, signing, process,
   const controller = new ComputerController({ native, now: () => 1_000, id: ids(), platform: 'darwin' })
   const evidence = await controller.evidence({ scopeId: 'agent-a' })
 
-  assert.equal(evidence.contractVersion, 4)
+  assert.equal(evidence.contractVersion, 5)
   assert.deepEqual(evidence.status, {
     platform: 'macos', helper: 'ready',
     accessibilityTrusted: status.accessibilityTrusted,
@@ -1264,4 +1264,269 @@ test('an in-flight observation cannot recreate state after Agent scope disposal'
   await assert.rejects(pending, /scope was disposed/)
   const evidence = await controller.evidence({ scopeId: 'agent-a' })
   assert.equal(evidence.activeObservations, 0)
+})
+
+async function visualFixture(controller, { scopeId = 'agent-a', ttlMs = 30_000 } = {}) {
+  const seen = await controller.observe({ ttlMs }, { scopeId })
+  const capture = await controller.visualObserve({ observationId: seen.observationId }, { scopeId })
+  return { seen, capture }
+}
+
+function visualActArgs(seen, capture, overrides = {}) {
+  return {
+    kind: 'point',
+    op: 'click',
+    observationId: seen.observationId,
+    captureSha256: capture.capture.artifact.sha256,
+    point: { x: 100, y: 100 },
+    ...overrides,
+  }
+}
+
+function approvalOutcome(outcome = 'allowed-once') {
+  return { async request() { return outcome } }
+}
+
+function countNativeVisualActs(native) {
+  return native.requests.filter(entry => entry.request.command === 'visual-act')
+}
+
+test('visualAct rejects wrong-owner, hash-changed, stale, and out-of-bounds visual actions without dispatch', async t => {
+  const native = new FakeNative()
+  const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+  const { seen, capture } = await visualFixture(controller)
+
+  await t.test('wrong owner scope', async () => {
+    const receipt = await controller.visualAct(visualActArgs(seen, capture), { scopeId: 'agent-b', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'rejected')
+    assert.match(receipt.reason, /wrong-owner|capture in this Agent scope/u)
+    assert.equal(countNativeVisualActs(native).length, 0)
+  })
+
+  await t.test('capture hash does not match this observation/capture', async () => {
+    const receipt = await controller.visualAct({
+      ...visualActArgs(seen, capture),
+      captureSha256: 'b'.repeat(64),
+    }, { scopeId: 'agent-a', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'rejected')
+    assert.match(receipt.reason, /unknown|consumed|wrong-owner/u)
+    assert.equal(countNativeVisualActs(native).length, 0)
+  })
+
+  await t.test('stale observation', async () => {
+    const stale = new FakeNative()
+    let staleNow = 1_000
+    const staleController = new ComputerController({ native: stale, capture: captureFixture(), now: () => staleNow, id: ids(), platform: 'darwin' })
+    const staleSeen = await staleController.observe({ ttlMs: 1_000 }, { scopeId: 'agent-a' })
+    const staleCapture = await staleController.visualObserve({ observationId: staleSeen.observationId }, { scopeId: 'agent-a' })
+    const before = countNativeVisualActs(stale).length
+    staleNow = 2_001
+    const receipt = await staleController.visualAct(visualActArgs(staleSeen, staleCapture), { scopeId: 'agent-a', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'rejected')
+    assert.match(receipt.reason, /stale/u)
+    assert.equal(countNativeVisualActs(stale).length, before)
+  })
+
+  await t.test('point at native image boundary is outside', async () => {
+    const receipt = await controller.visualAct({
+      ...visualActArgs(seen, capture),
+      point: { x: capture.capture.pixelWidth, y: 0 },
+    }, { scopeId: 'agent-a', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'rejected')
+    assert.match(receipt.reason, /outside the captured window bounds/u)
+    assert.equal(countNativeVisualActs(native).length, 0)
+  })
+
+  await t.test('drag endpoint outside native image is rejected', async () => {
+    const receipt = await controller.visualAct({
+      ...visualActArgs(seen, capture),
+      op: 'drag',
+      point: { x: 10, y: 10 },
+      to: { x: 10, y: capture.capture.pixelHeight },
+    }, { scopeId: 'agent-a', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'rejected')
+    assert.match(receipt.reason, /drag endpoint.*outside/u)
+    assert.equal(countNativeVisualActs(native).length, 0)
+  })
+
+  await t.test('non-integer native point is rejected', async () => {
+    const receipt = await controller.visualAct({
+      ...visualActArgs(seen, capture),
+      point: { x: 10.5, y: 10 },
+    }, { scopeId: 'agent-a', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'rejected')
+    assert.match(receipt.reason, /integer native-image pixel/u)
+    assert.equal(countNativeVisualActs(native).length, 0)
+  })
+})
+
+test('visualAct requires host approval and never dispatches on refusal or unavailability', async () => {
+  const native = new FakeNative()
+  const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+  const { seen, capture } = await visualFixture(controller)
+
+  const missing = await controller.visualAct(visualActArgs(seen, capture), { scopeId: 'agent-a' })
+  assert.equal(missing.status, 'rejected')
+  assert.match(missing.reason, /approval is unavailable/u)
+  assert.equal(countNativeVisualActs(native).length, 0)
+
+  const rejected = await controller.visualAct(visualActArgs(seen, capture), { scopeId: 'agent-a', approval: approvalOutcome('rejected') })
+  assert.equal(rejected.status, 'rejected')
+  assert.match(rejected.reason, /user rejected/u)
+  assert.equal(countNativeVisualActs(native).length, 0)
+
+  const unavailable = await controller.visualAct(visualActArgs(seen, capture), { scopeId: 'agent-a', approval: approvalOutcome('unavailable') })
+  assert.equal(unavailable.status, 'rejected')
+  assert.match(unavailable.reason, /approval is unavailable/u)
+  assert.equal(countNativeVisualActs(native).length, 0)
+})
+
+test('visualAct dispatches accepted unknown exactly once, returns postAction, and rejects retry', async () => {
+  const native = new FakeNative({
+    actionResult: {
+      status: 'confirmed',
+      reason: 'native helper believes it dispatched',
+      accepted: true,
+      post: {
+        capturedAt: '2026-08-24T00:00:00.200Z',
+        app: observation().app,
+        window: observation().window,
+        target: node({ value: 'visible-state-proof' }),
+      },
+    },
+  })
+  let approvals = 0
+  const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+  const { seen, capture } = await visualFixture(controller)
+
+  const receipt = await controller.visualAct(visualActArgs(seen, capture), {
+    scopeId: 'agent-a',
+    approval: { async request() { approvals += 1; return 'allowed-once' } },
+  })
+  assert.equal(receipt.status, 'unknown', 'visual dispatch must stay unknown even when native says confirmed')
+  assert.match(receipt.reason, /still requires re-observation/u)
+  assert.equal(receipt.nativeAccepted, true)
+  assert.equal(receipt.postAction?.target?.value, 'visible-state-proof', 'post-action observation should be returned when native provides one')
+  assert.equal(receipt.captureSha256, capture.capture.artifact.sha256)
+  assert.equal(approvals, 1)
+  assert.equal(countNativeVisualActs(native).length, 1)
+
+  const retry = await controller.visualAct(visualActArgs(seen, capture), {
+    scopeId: 'agent-a',
+    approval: { async request() { approvals += 1; return 'allowed-once' } },
+  })
+  assert.equal(retry.status, 'rejected')
+  assert.match(retry.reason, /consumed|stale|wrong-owner|unknown/u)
+  assert.equal(approvals, 1, 'a consumed visual binding must not ask again for the same action')
+  assert.equal(countNativeVisualActs(native).length, 1)
+})
+
+test('visualAct routes drag and scroll payloads with approval digests and validates secure endpoints', async t => {
+  await t.test('drag sends both native endpoints', async () => {
+    const native = new FakeNative()
+    const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+    const { seen, capture } = await visualFixture(controller)
+    const receipt = await controller.visualAct({
+      ...visualActArgs(seen, capture),
+      op: 'drag',
+      point: { x: 20, y: 20 },
+      to: { x: 180, y: 200 },
+    }, { scopeId: 'agent-a', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'unknown')
+    const visual = countNativeVisualActs(native).at(-1)?.request?.visual
+    assert.equal(visual?.action?.op, 'drag')
+    assert.deepEqual(visual?.action?.point, { x: 20, y: 20 })
+    assert.deepEqual(visual?.action?.to, { x: 180, y: 200 })
+    assert.equal(visual?.approval?.riskCode, 'visual-point-action')
+    assert.equal(visual?.approval?.observationId, seen.observationId)
+    assert.equal(visual?.approval?.actionDigest, visual?.approval?.actionDigest)
+    assert.equal(visual?.captureSha256, capture.capture.artifact.sha256)
+  })
+
+  await t.test('scroll sends wheel route payload', async () => {
+    const native = new FakeNative()
+    const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+    const { seen, capture } = await visualFixture(controller)
+    const receipt = await controller.visualAct({
+      ...visualActArgs(seen, capture),
+      op: 'scroll',
+      point: { x: 50, y: 60 },
+      direction: 'up',
+      amount: 120,
+    }, { scopeId: 'agent-a', approval: approvalOutcome() })
+    assert.equal(receipt.status, 'unknown')
+    const visual = countNativeVisualActs(native).at(-1)?.request?.visual
+    assert.equal(visual?.action?.op, 'scroll')
+    assert.deepEqual(visual?.action?.point, { x: 50, y: 60 })
+    assert.equal(visual?.action?.direction, 'up')
+    assert.equal(visual?.action?.amount, 120)
+    assert.equal(visual?.captureSha256, capture.capture.artifact.sha256)
+  })
+
+  await t.test('drag endpoint on a secure field is denied before approval', async () => {
+    const secure = node({ role: 'AXSecureTextField', name: null, identifier: 'secure', secure: true, actions: [], frame: { x: 50, y: 50, width: 100, height: 100 }, locator: [9] })
+    const native = new FakeNative({ observation: observation({ nodes: [node(), secure] }) })
+    let approvals = 0
+    const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+    const { seen, capture } = await visualFixture(controller)
+    const receipt = await controller.visualAct({
+      ...visualActArgs(seen, capture),
+      op: 'drag',
+      point: { x: 20, y: 20 },
+      to: { x: 100, y: 100 },
+    }, { scopeId: 'agent-a', approval: { async request() { approvals += 1; return 'allowed-once' } } })
+    assert.equal(receipt.status, 'rejected')
+    assert.match(receipt.reason, /drag endpoint.*secure/u)
+    assert.equal(approvals, 0)
+    assert.equal(countNativeVisualActs(native).length, 0)
+  })
+})
+
+test('evidence includes mixed AX and visual receipts with consistent ring counters and lossless JSON', async () => {
+  const native = new FakeNative()
+  const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+  const { seen: visualSeen, capture: visualCapture } = await visualFixture(controller)
+  const visual = await controller.visualAct(visualActArgs(visualSeen, visualCapture), {
+    scopeId: 'agent-a', approval: approvalOutcome(),
+  })
+  assert.equal(visual.status, 'unknown')
+
+  const axSeen = await controller.observe({}, { scopeId: 'agent-a' })
+  const ax = await controller.act({ kind: 'focus', ref: axSeen.targets[0].ref }, { scopeId: 'agent-a' })
+  assert.equal(ax.status, 'unknown')
+
+  const evidence = await controller.evidence({ scopeId: 'agent-a' }, { limit: 10 })
+  assert.equal(evidence.receipts_total, 2)
+  assert.equal(evidence.receipts_dropped, 0)
+  assert.equal(evidence.receipts_returned, 2)
+  assert.equal(evidence.receipts.length, 2)
+  assert.ok(evidence.receipts.some(receipt => 'captureSha256' in receipt), 'visual receipt must remain visible in evidence')
+  assert.ok(evidence.receipts.some(receipt => 'ref' in receipt), 'AX receipt must remain visible in evidence')
+  assert.equal(evidence.receipts.filter(receipt => 'captureSha256' in receipt).length, 1)
+  assert.equal(evidence.receipts.filter(receipt => 'ref' in receipt).length, 1)
+  assert.doesNotThrow(() => JSON.stringify(evidence))
+  const receiptBytes = []
+  const visit = value => {
+    if (value instanceof Uint8Array) receiptBytes.push(value)
+    if (Array.isArray(value)) return value.forEach(visit)
+    if (value !== null && typeof value === 'object') Object.values(value).forEach(visit)
+  }
+  visit(evidence)
+  assert.deepEqual(receiptBytes, [], 'evidence JSON must not contain binary buffers')
+
+  const limited = await controller.evidence({ scopeId: 'agent-a' }, { limit: 1 })
+  assert.equal(limited.receipts_total, 2)
+  assert.equal(limited.receipts_returned, 1)
+  assert.ok('ref' in limited.receipts[0], 'last receipt is the newer AX receipt when limit truncates')
+})
+
+test('evidence receipts are owner-isolated across AX and visual scopes', async () => {
+  const native = new FakeNative()
+  const controller = new ComputerController({ native, capture: captureFixture(), now: () => 1_000, id: ids(), platform: 'darwin' })
+  const { seen, capture } = await visualFixture(controller, { scopeId: 'agent-a' })
+  await controller.visualAct(visualActArgs(seen, capture), { scopeId: 'agent-a', approval: approvalOutcome() })
+  const other = await controller.evidence({ scopeId: 'agent-b' })
+  assert.equal(other.receipts_total, 0)
+  assert.equal(other.receipts_returned, 0)
+  assert.deepEqual(other.receipts, [])
 })

@@ -5,7 +5,8 @@ import { app, windowIdentity } from './fixtures.mjs'
 
 function driver() {
   return {
-    kind: 'computer', platform: 'macos', contractVersion: 4,
+    kind: 'computer', platform: 'macos', contractVersion: 5,
+    async visualAct() { throw new Error('not reached') },
     async observe() { throw new Error('not reached') },
     async visualObserve() { throw new Error('not reached') },
     async act() { throw new Error('not reached') },
@@ -340,6 +341,7 @@ test('every raw tool executor enforces additionalProperties false without relyin
   const attempts = [
     [tools.computerObserve, { unexpected: true }],
     [tools.computerVisualObserve, { observation_id: 'obs_private', unexpected: true }],
+    [tools.computerVisualAct, { op: 'click', observation_id: 'obs_private', capture_sha256: 'a'.repeat(64), point: { x: 1, y: 1 }, approved: true }],
     [tools.computerAct, { action: 'click', ref: 'cu_private', approved: true }],
     [tools.computerEvidence, { risk: 'safe' }],
   ]
@@ -406,4 +408,187 @@ test('missing execute callId makes an approval request unavailable without touch
   )
   assert.equal(outcome, 'unavailable')
   assert.equal(getterCalls, 0)
+})
+
+function visualHost(toolsOverrides = {}) {
+  const attachments = {
+    async saveImage() {
+      return {
+        attachmentId: 'att_visual', mediaType: 'image/webp', bytes: 1234,
+        width: 900, height: 700, name: 'normalized.webp',
+        originalDimensions: { width: 1800, height: 1400 },
+      }
+    },
+  }
+  const llm = {
+    async resolveModelInfo() { return { inputModalities: ['text', 'image'] } },
+  }
+  return {
+    attachments,
+    llm,
+    host: {
+      getService(name) { return name === 'attachments' ? attachments : llm },
+      ...toolsOverrides,
+    },
+  }
+}
+
+async function prepareVisualAct(tools, exec = execution()) {
+  await tools.computerVisualObserve.execute({ observation_id: 'obs_private' }, exec)
+}
+
+test('computer_visual_act converts attachment pixels to native pixels with trusted stored metadata', async () => {
+  const fake = driver()
+  const received = []
+  fake.visualObserve = async () => visualCapture()
+  fake.visualAct = async action => {
+    received.push(action)
+    return { status: 'unknown' }
+  }
+  const { host } = visualHost()
+  const tools = createComputerTools(fake, host)
+  await prepareVisualAct(tools)
+
+  await tools.computerVisualAct.execute({
+    op: 'click',
+    observation_id: 'obs_private',
+    capture_sha256: 'a'.repeat(64),
+    point: { x: 10, y: 20 },
+  }, execution())
+  assert.deepEqual(received.at(-1), {
+    kind: 'point',
+    op: 'click',
+    observationId: 'obs_private',
+    captureSha256: 'a'.repeat(64),
+    point: { x: 20, y: 40 },
+  })
+
+  await tools.computerVisualAct.execute({
+    op: 'drag',
+    observation_id: 'obs_private',
+    capture_sha256: 'a'.repeat(64),
+    point: { x: 10, y: 20 },
+    to: { x: 100, y: 50 },
+  }, execution())
+  assert.deepEqual(received.at(-1), {
+    kind: 'point',
+    op: 'drag',
+    observationId: 'obs_private',
+    captureSha256: 'a'.repeat(64),
+    point: { x: 20, y: 40 },
+    to: { x: 200, y: 100 },
+  })
+
+  await tools.computerVisualAct.execute({
+    op: 'scroll',
+    observation_id: 'obs_private',
+    capture_sha256: 'a'.repeat(64),
+    point: { x: 25, y: 30 },
+    direction: 'up',
+    amount: 'page',
+  }, execution())
+  assert.deepEqual(received.at(-1), {
+    kind: 'point',
+    op: 'scroll',
+    observationId: 'obs_private',
+    captureSha256: 'a'.repeat(64),
+    point: { x: 50, y: 60 },
+    direction: 'up',
+    amount: 'page',
+  })
+})
+
+test('computer_visual_act refuses calls without trusted metadata and rejects injected scale/native coords', async () => {
+  const fake = driver()
+  fake.visualObserve = async () => visualCapture()
+  fake.visualAct = async () => ({ status: 'unknown' })
+  const { host } = visualHost()
+  const tools = createComputerTools(fake, host)
+
+  await assert.rejects(
+    tools.computerVisualAct.execute({
+      op: 'click', observation_id: 'obs_private', capture_sha256: 'a'.repeat(64), point: { x: 10, y: 10 },
+    }, execution()),
+    /no trusted capture metadata/u,
+  )
+
+  await prepareVisualAct(tools)
+  await assert.rejects(
+    tools.computerVisualAct.execute({
+      op: 'click', observation_id: 'obs_private', capture_sha256: 'a'.repeat(64),
+      point: { x: 10, y: 10 }, attachment_scale: 0.5,
+    }, execution()),
+    /unexpected argument/u,
+  )
+  await assert.rejects(
+    tools.computerVisualAct.execute({
+      op: 'click', observation_id: 'obs_private', capture_sha256: 'a'.repeat(64),
+      point: { x: 900, y: 10 },
+    }, execution()),
+    /outside the delivered attachment image bounds/u,
+  )
+  await assert.rejects(
+    tools.computerVisualAct.execute({
+      op: 'drag', observation_id: 'obs_private', capture_sha256: 'a'.repeat(64),
+      point: { x: 10, y: 10 }, to: { x: 10, y: 700 },
+    }, execution()),
+    /drag endpoint.*outside/u,
+  )
+  await assert.rejects(
+    tools.computerVisualAct.execute({
+      op: 'click', observation_id: 'obs_private', capture_sha256: 'a'.repeat(64),
+      point: { x: 1_000_000, y: 10 },
+    }, execution()),
+    /outside the delivered attachment image bounds/u,
+  )
+})
+
+test('computer_visual_act forwards host approval with the exact visual tool name', async () => {
+  const fake = driver()
+  fake.visualObserve = async () => visualCapture()
+  let driverContext
+  fake.visualAct = async (_action, context) => {
+    driverContext = context
+    return context.approval.request('generated visual reason')
+  }
+  let approvalRequest
+  const agent = { id: 'agent-a' }
+  const signal = new AbortController().signal
+  const { host } = visualHost({
+    getApproval() {
+      return {
+        async request(request) {
+          approvalRequest = request
+          return 'allowed-once'
+        },
+      }
+    },
+  })
+  const tools = createComputerTools(fake, host)
+  await prepareVisualAct(tools)
+
+  const result = await tools.computerVisualAct.execute({
+    op: 'click', observation_id: 'obs_private', capture_sha256: 'a'.repeat(64), point: { x: 10, y: 10 },
+  }, { ...execution(), callId: 'call-visual-act', agent, signal })
+
+  assert.equal(result, 'allowed-once')
+  assert.equal(driverContext.scopeId, 'agent-a')
+  assert.equal(approvalRequest.toolName, 'computer_visual_act')
+  assert.equal(approvalRequest.agent, agent)
+  assert.equal(approvalRequest.callId, 'call-visual-act')
+  assert.equal(approvalRequest.reason, 'generated visual reason')
+  assert.equal(approvalRequest.signal, signal)
+})
+
+test('computer_visual_act schema does not accept native points, scale, approval, ref, or path', async () => {
+  const tools = createComputerTools(driver())
+  const parameters = tools.computerVisualAct.parameters.properties
+  for (const forbidden of ['native_point', 'scale', 'attachment_scale', 'approved', 'ref', 'path', 'window_number']) {
+    assert.equal(forbidden in parameters, false, `must reject ${forbidden}`)
+  }
+  assert.deepEqual(tools.computerVisualAct.parameters.required, ['op', 'observation_id', 'capture_sha256', 'point'])
+  assert.equal('to' in parameters, true)
+  assert.equal('direction' in parameters, true)
+  assert.equal('amount' in parameters, true)
+  assert.deepEqual(Object.keys(tools.computerVisualObserve.parameters.properties).sort(), ['max_marks', 'observation_id'])
 })

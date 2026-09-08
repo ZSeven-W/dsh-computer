@@ -8,7 +8,10 @@ import type {
   ComputerObservation,
   ComputerObserveRequest,
   ComputerModifier,
+  ComputerPoint,
   ComputerScrollAmount,
+  ComputerVisualAction,
+  ComputerVisualActionReceipt,
 } from './contracts.js'
 import {
   commitVisualCapture,
@@ -59,6 +62,14 @@ export interface ComputerToolHost {
   getApproval?(): StructuralApprovalService | undefined
   /** Called inside each visual execution; services may mount or change after plugin activation. */
   getService?(name: 'attachments' | 'llm'): unknown
+}
+
+/** Trusted attachment geometry registered when computer_visual_observe persists a PNG. */
+interface ToolVisualCaptureMetadata {
+  pixelWidth: number
+  pixelHeight: number
+  attachmentWidth: number
+  attachmentHeight: number
 }
 
 export interface StructuralToolDefinition {
@@ -170,10 +181,26 @@ const receiptSchema: JsonSchema = {
     'startedAt', 'finishedAt', 'reason', 'nativeAccepted', 'postAction',
   ],
 }
+const visualReceiptSchema: JsonSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    receiptId: { type: 'string' }, sequence: { type: 'integer' },
+    status: { type: 'string', enum: ['confirmed', 'unknown', 'rejected', 'failed'] },
+    action: { type: 'string', enum: ['click', 'drag', 'scroll'] },
+    observationId: nullable({ type: 'string' }), observationFingerprint: nullable({ type: 'string' }),
+    captureSha256: nullable({ type: 'string' }),
+    startedAt: { type: 'string' }, finishedAt: { type: 'string' }, reason: { type: 'string' },
+    nativeAccepted: { type: 'boolean' }, postAction: postSchema,
+  },
+  required: [
+    'receiptId', 'sequence', 'status', 'action', 'observationId', 'observationFingerprint',
+    'captureSha256', 'startedAt', 'finishedAt', 'reason', 'nativeAccepted', 'postAction',
+  ],
+}
 const evidenceSchema: JsonSchema = {
   type: 'object', additionalProperties: false,
   properties: {
-    contractVersion: { type: 'integer', const: 4 }, scope: { type: 'string' },
+    contractVersion: { type: 'integer', const: 5 }, scope: { type: 'string' },
     status: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -234,7 +261,7 @@ const evidenceSchema: JsonSchema = {
       ],
     },
     activeObservations: { type: 'integer' }, activeNativeRequests: { type: 'integer' },
-    receipts: { type: 'array', items: receiptSchema },
+    receipts: { type: 'array', items: { oneOf: [receiptSchema, visualReceiptSchema] } },
     receipts_total: { type: 'integer' }, receipts_dropped: { type: 'integer' },
     receipts_returned: { type: 'integer' }, bounded: { type: 'boolean', const: true },
   },
@@ -388,7 +415,11 @@ function executionContext(exec: StructuralToolRunContext): ComputerDriverContext
   }
 }
 
-function actionExecutionContext(exec: StructuralToolRunContext, host: ComputerToolHost): ComputerDriverContext {
+function approvalExecutionContext(
+  exec: StructuralToolRunContext,
+  host: ComputerToolHost,
+  toolName: 'computer_act' | 'computer_visual_act',
+): ComputerDriverContext {
   const base = executionContext(exec)
   const agent = exec.agent as object & { readonly id?: unknown }
   if (host.getApproval === undefined) return base
@@ -402,7 +433,7 @@ function actionExecutionContext(exec: StructuralToolRunContext, host: ComputerTo
         if (approval === undefined || typeof approval.request !== 'function') return 'unavailable'
         const outcome = await approval.request({
           agent,
-          toolName: 'computer_act',
+          toolName,
           callId,
           reason,
           signal: exec.signal,
@@ -413,6 +444,14 @@ function actionExecutionContext(exec: StructuralToolRunContext, host: ComputerTo
       },
     },
   }
+}
+
+function actionExecutionContext(exec: StructuralToolRunContext, host: ComputerToolHost): ComputerDriverContext {
+  return approvalExecutionContext(exec, host, 'computer_act')
+}
+
+function visualActionExecutionContext(exec: StructuralToolRunContext, host: ComputerToolHost): ComputerDriverContext {
+  return approvalExecutionContext(exec, host, 'computer_visual_act')
 }
 
 function observeRequest(args: Record<string, unknown>): ComputerObserveRequest {
@@ -468,18 +507,105 @@ function actionRequest(args: Record<string, unknown>): ComputerAction {
   throw new Error('computer_act: action must be click, focus, type, key, or scroll')
 }
 
+function visualAttachmentPoint(
+  value: unknown,
+  label: string,
+  tool: string,
+): ComputerPoint {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${tool}: ${label} must be an object with finite numeric x and y`)
+  }
+  const point = value as Record<string, unknown>
+  if (typeof point.x !== 'number' || typeof point.y !== 'number'
+    || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+    throw new Error(`${tool}: ${label} must carry finite numeric x and y`)
+  }
+  return { x: point.x, y: point.y }
+}
+
+function attachmentToNativePoint(
+  value: unknown,
+  label: string,
+  metadata: ToolVisualCaptureMetadata,
+  tool: string,
+): ComputerPoint {
+  const attachment = visualAttachmentPoint(value, label, tool)
+  if (attachment.x < 0 || attachment.y < 0
+    || attachment.x >= metadata.attachmentWidth || attachment.y >= metadata.attachmentHeight) {
+    throw new Error(`${tool}: ${label} is outside the delivered attachment image bounds; the visual action was not dispatched`)
+  }
+  // Trusted capture metadata only: the model can never pass an attachment
+  // scale or native coordinate. Attachment pixels map to native pixels with
+  // native = round(attachment / attachmentScale), where attachmentScale =
+  // stored attachment width/native pixel width.
+  const scaleX = metadata.attachmentWidth / metadata.pixelWidth
+  const scaleY = metadata.attachmentHeight / metadata.pixelHeight
+  const native = {
+    x: Math.round(attachment.x / scaleX),
+    y: Math.round(attachment.y / scaleY),
+  }
+  if (!Number.isSafeInteger(native.x) || !Number.isSafeInteger(native.y)
+    || native.x < 0 || native.y < 0
+    || native.x >= metadata.pixelWidth || native.y >= metadata.pixelHeight) {
+    throw new Error(`${tool}: ${label} maps outside the native captured window bounds; the visual action was not dispatched`)
+  }
+  return native
+}
+
+function visualActionRequest(
+  args: Record<string, unknown>,
+  metadata: ToolVisualCaptureMetadata,
+): ComputerVisualAction {
+  const tool = 'computer_visual_act'
+  const op = args.op
+  if (op !== 'click' && op !== 'drag' && op !== 'scroll') {
+    throw new Error(`${tool}: op must be click, drag, or scroll`)
+  }
+  const observationId = args.observation_id
+  const captureSha256 = args.capture_sha256
+  if (typeof observationId !== 'string' || observationId.trim() === '') {
+    throw new Error(`${tool}: observation_id is required`)
+  }
+  if (typeof captureSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(captureSha256)) {
+    throw new Error(`${tool}: capture_sha256 must be the exact 64-hex digest from computer_visual_observe`)
+  }
+  const point = attachmentToNativePoint(args.point, 'point', metadata, tool)
+  if (op === 'click') {
+    return { kind: 'point', op: 'click', observationId, captureSha256, point }
+  }
+  if (op === 'drag') {
+    const to = attachmentToNativePoint(args.to, 'drag endpoint', metadata, tool)
+    return { kind: 'point', op: 'drag', observationId, captureSha256, point, to }
+  }
+  const direction = args.direction
+  if (direction !== 'up' && direction !== 'down') {
+    throw new Error(`${tool}: direction is required for scroll and must be up or down`)
+  }
+  const amount = args.amount
+  if (amount !== undefined && amount !== 'line' && amount !== 'page'
+    && (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0)) {
+    throw new Error(`${tool}: amount must be line, page, or a positive number`)
+  }
+  return amount === undefined
+    ? { kind: 'point', op: 'scroll', observationId, captureSha256, point, direction }
+    : { kind: 'point', op: 'scroll', observationId, captureSha256, point, direction, amount: amount as ComputerScrollAmount }
+}
+
 export interface ComputerTools {
   computerObserve: StructuralToolDefinition
   computerVisualObserve: StructuralToolDefinition
+  computerVisualAct: StructuralToolDefinition
   computerAct: StructuralToolDefinition
   computerEvidence: StructuralToolDefinition
 }
 
 export const COMPUTER_TOOL_NAMES = [
-  'computer_observe', 'computer_visual_observe', 'computer_act', 'computer_evidence',
+  'computer_observe', 'computer_visual_observe', 'computer_visual_act', 'computer_act', 'computer_evidence',
 ] as const
 
 export function createComputerTools(driver: ComputerDriver, host: ComputerToolHost = {}): ComputerTools {
+  /** Trusted attachment metadata for later coordinate conversion, keyed by the native capture SHA-256. */
+  const visualCaptures = new Map<string, ToolVisualCaptureMetadata>()
   const computerObserve: StructuralToolDefinition = {
     name: 'computer_observe',
     description: 'Observe one explicit macOS application/window through Accessibility and return bounded, opaque, expiring refs. '
@@ -543,9 +669,59 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
         ...(maxMarks === undefined ? {} : { maxMarks }),
       }, executionContext(exec))
       throwIfVisualAborted(exec.signal)
-      return commitVisualCapture(attachments, captured, exec.signal)
+      const visualValue = await commitVisualCapture(attachments, captured, exec.signal)
+      visualCaptures.set(visualValue.capture.artifact.sha256, {
+        pixelWidth: visualValue.capture.nativePixels.width,
+        pixelHeight: visualValue.capture.nativePixels.height,
+        attachmentWidth: visualValue.capture.attachmentPixels.width,
+        attachmentHeight: visualValue.capture.attachmentPixels.height,
+      })
+      return visualValue
     },
     presentCall: () => ({ card: 'generic', title: 'Visually observe macOS window', kind: 'read' }),
+  }
+
+  const computerVisualAct: StructuralToolDefinition = {
+    name: 'computer_visual_act',
+    description: 'Perform one click, drag, or scroll at attachment-image pixels from a computer_visual_observe result in this Agent scope. '
+      + 'The tool converts model point/to attachment pixels to native capture pixels using only the trusted attachment metadata stored by computer_visual_observe; '
+      + 'the model cannot pass a scale, native point, path, window, ref, approval, or Agent id. Every visual action is an AX-opaque unknown target and requires '
+      + 'one host-owned allowed-once approval. The driver re-observes and re-captures the exact bound window before asking and again immediately before dispatch. '
+      + 'A receipt of unknown means input may have been dispatched and the visible outcome requires re-observation; never retry an unknown receipt from this tool.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        op: { type: 'string', enum: ['click', 'drag', 'scroll'] },
+        observation_id: { type: 'string', description: 'Opaque observation id from computer_observe, bound to this visual capture.' },
+        capture_sha256: { type: 'string', description: 'Exact 64-hex artifact SHA-256 from computer_visual_observe.' },
+        point: {
+          type: 'object', additionalProperties: false,
+          properties: { x: { type: 'number', description: 'X in the delivered attachment image pixels.' }, y: { type: 'number', description: 'Y in the delivered attachment image pixels.' } },
+          required: ['x', 'y'],
+        },
+        to: {
+          type: 'object', additionalProperties: false,
+          properties: { x: { type: 'number', description: 'Drag destination X in delivered attachment image pixels.' }, y: { type: 'number', description: 'Drag destination Y in delivered attachment image pixels.' } },
+          required: ['x', 'y'],
+        },
+        direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction for op=scroll.' },
+        amount: { description: 'Scroll amount for op=scroll: line, page (default), or a positive point count.', oneOf: [{ type: 'string', enum: ['line', 'page'] }, { type: 'number' }] },
+      },
+      required: ['op', 'observation_id', 'capture_sha256', 'point'],
+    },
+    output: { schema: visualReceiptSchema, render: renderJson },
+    timeoutMs: 30_000,
+    async execute(value, exec): Promise<ComputerVisualActionReceipt> {
+      const args = record(value, 'computer_visual_act')
+      assertOnlyKeys(args, ['op', 'observation_id', 'capture_sha256', 'point', 'to', 'direction', 'amount'], 'computer_visual_act')
+      const captureSha = args.capture_sha256
+      const metadata = typeof captureSha === 'string' ? visualCaptures.get(captureSha) : undefined
+      if (metadata === undefined) {
+        throw new Error('computer_visual_act: no trusted capture metadata for this capture_sha256 in this process; run computer_visual_observe again')
+      }
+      return driver.visualAct(visualActionRequest(args, metadata), visualActionExecutionContext(exec, host))
+    },
+    presentCall: () => ({ card: 'generic', title: 'Act visually on macOS window', kind: 'execute' }),
   }
 
   const computerAct: StructuralToolDefinition = {
@@ -605,5 +781,5 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
     presentCall: () => ({ card: 'generic', title: 'Inspect Computer Use evidence', kind: 'read' }),
   }
 
-  return { computerObserve, computerVisualObserve, computerAct, computerEvidence }
+  return { computerObserve, computerVisualObserve, computerVisualAct, computerAct, computerEvidence }
 }

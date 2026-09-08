@@ -310,6 +310,10 @@ public enum WindowCaptureEngine {
         let pointFrame: ComputerFrame
     }
 
+    /// Deadline for the modern ScreenCaptureKit path. The old CGWindowList path
+    /// remains synchronous and did not previously expose a timeout.
+    private static let modernCaptureTimeout: TimeInterval = 5.0
+
     public static func screenRecordingPreflight() -> Bool {
         CGPreflightScreenCaptureAccess()
     }
@@ -320,7 +324,7 @@ public enum WindowCaptureEngine {
         expectedPointFrame: ComputerFrame,
         targets: [VisualCaptureTarget],
         outputPath: String
-    ) throws -> VisualCaptureOutput {
+    ) async throws -> VisualCaptureOutput {
         guard screenRecordingPreflight() else {
             throw VisualCaptureFailure(
                 code: "screen_recording_permission_required",
@@ -345,18 +349,55 @@ public enum WindowCaptureEngine {
                 message: "Accessibility and CoreGraphics window bounds disagree; refusing unsafe overlay coordinates"
             )
         }
-        guard let image = CGWindowListCreateImage(
-            .null,
-            .optionIncludingWindow,
-            windowID,
-            [.boundsIgnoreFraming, .bestResolution]
-        ) else {
-            throw VisualCaptureFailure(
-                code: "window_capture_failed",
-                message: "CoreGraphics returned no image for the validated window while Screen Recording preflight was granted"
-            )
+
+        let image: CGImage
+        if #available(macOS 14.0, *) {
+            do {
+                image = try await SCKWindowCapture.capture(
+                    windowID: windowID,
+                    ownerPID: ownerPID,
+                    expectedFrame: CGRect(
+                        x: metadata.pointFrame.x,
+                        y: metadata.pointFrame.y,
+                        width: metadata.pointFrame.width,
+                        height: metadata.pointFrame.height
+                    ),
+                    timeout: modernCaptureTimeout
+                )
+            } catch {
+                // Modern errors must not silently fall back to a stale or less
+                // stable CGWindowList image.
+                throw visualFailure(error)
+            }
+        } else {
+            guard let cgImage = CGWindowListCreateImage(
+                .null,
+                .optionIncludingWindow,
+                windowID,
+                [.boundsIgnoreFraming, .bestResolution]
+            ) else {
+                throw VisualCaptureFailure(
+                    code: "window_capture_failed",
+                    message: "CoreGraphics returned no image for the validated window while Screen Recording preflight was granted"
+                )
+            }
+            image = cgImage
         }
 
+        return try finishCapture(
+            image: image,
+            metadata: metadata,
+            targets: targets,
+            outputPath: outputPath
+        )
+    }
+
+    private static func finishCapture(
+        image: CGImage,
+        metadata: WindowMetadata,
+        targets: [VisualCaptureTarget],
+        outputPath: String
+    ) throws -> VisualCaptureOutput {
         let quality = try PixelQualityAnalyzer.analyze(image: image)
         guard quality.usable else {
             throw VisualCaptureFailure(
@@ -397,6 +438,31 @@ public enum WindowCaptureEngine {
             quality: quality,
             marks: marks
         )
+    }
+
+    private static func visualFailure(_ error: Error) -> VisualCaptureFailure {
+        if let failure = error as? VisualCaptureFailure {
+            return failure
+        }
+        guard let captureError = error as? SCKCaptureError else {
+            return VisualCaptureFailure(code: "window_capture_failed", message: String(describing: error))
+        }
+        switch captureError {
+        case .invalidWindowID:
+            return VisualCaptureFailure(code: "invalid_window_number", message: captureError.debugDescription)
+        case .invalidOwnerPID:
+            return VisualCaptureFailure(code: "window_owner_mismatch", message: captureError.debugDescription)
+        case .invalidExpectedFrame:
+            return VisualCaptureFailure(code: "invalid_window_frame", message: captureError.debugDescription)
+        case .permissionDenied:
+            return VisualCaptureFailure(code: "screen_recording_permission_required", message: captureError.debugDescription)
+        case .windowNotFound, .windowAmbiguous, .windowIDMismatch, .windowOwnerMismatch:
+            return VisualCaptureFailure(code: "window_id_mismatch", message: captureError.debugDescription)
+        case .windowBoundsMismatch:
+            return VisualCaptureFailure(code: "window_bounds_mismatch", message: captureError.debugDescription)
+        case .contentUnavailable, .unsafePixelDimensions, .returnedDimensionMismatch, .timedOut, .captureFailed:
+            return VisualCaptureFailure(code: "window_capture_failed", message: captureError.debugDescription)
+        }
     }
 
     private static func windowMetadata(windowID: CGWindowID) throws -> WindowMetadata {

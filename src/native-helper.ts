@@ -26,6 +26,7 @@ import type {
   NativeHelperResolutionSource,
   NativeStatusResult,
   NativeTransport,
+  NativeVisualActResult,
 } from './native-protocol.js'
 
 const MAX_HELPER_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -755,7 +756,7 @@ export class NativeHelper implements NativeTransport {
     }
   }
 
-  async request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult>(
+  async request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult>(
     request: NativeRequest,
     options: { scopeId: string; signal?: AbortSignal },
   ): Promise<T> {
@@ -786,7 +787,7 @@ export class NativeHelper implements NativeTransport {
         },
       })
     } catch (error) {
-      if (request.command === 'act' && spawned) {
+      if ((request.command === 'act' || request.command === 'visual-act') && spawned) {
         const code = error instanceof NativeHelperError ? error.code : 'helper_transport_lost'
         throw new NativeHelperError(code, error instanceof Error ? error.message : String(error), true)
       }
@@ -794,16 +795,16 @@ export class NativeHelper implements NativeTransport {
     }
     const line = result.stdout.trim().split(/\r?\n/u).filter(Boolean).at(-1)
     if (!line) throw new NativeHelperError(
-      'invalid_helper_response', 'native helper returned no JSON response', request.command === 'act',
+      'invalid_helper_response', 'native helper returned no JSON response', request.command === 'act' || request.command === 'visual-act',
     )
     let response: NativeResponse
     try {
       response = JSON.parse(line) as NativeResponse
     } catch {
-      throw new NativeHelperError('invalid_helper_response', 'native helper returned invalid JSON', request.command === 'act')
+      throw new NativeHelperError('invalid_helper_response', 'native helper returned invalid JSON', request.command === 'act' || request.command === 'visual-act')
     }
     if (response.id !== request.id) {
-      throw new NativeHelperError('invalid_helper_response', 'native helper response id mismatch', request.command === 'act')
+      throw new NativeHelperError('invalid_helper_response', 'native helper response id mismatch', request.command === 'act' || request.command === 'visual-act')
     }
     if (!response.ok || response.result === undefined) {
       throw new NativeHelperError(response.error?.code ?? 'helper_error', response.error?.message ?? 'native helper failed')

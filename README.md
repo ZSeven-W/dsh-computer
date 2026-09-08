@@ -52,7 +52,7 @@ receipt: confirmed | unknown | rejected | failed
   + post-action observation when available
 ```
 
-The first vertical slice deliberately has no settings page. It exposes four headless tools and a reusable Cordis driver service for `dsh-qa`.
+The first vertical slice deliberately has no settings page. It exposes five headless tools and a reusable Cordis driver service for `dsh-qa`.
 
 ## Tools
 
@@ -60,12 +60,15 @@ The first vertical slice deliberately has no settings page. It exposes four head
 | --- | --- |
 | `computer_observe` | Bounded Accessibility tree for one macOS app/window. Returns opaque refs, a fingerprint, and an expiry. |
 | `computer_visual_observe` | Captures only the numbered window bound to a fresh observation, validates its pixels, burns bounded AX Set-of-Mark labels into the image, and delivers it through DSH attachments to the exact current image-capable model. |
+| `computer_visual_act` | Performs a `click`, `drag`, or `scroll` at attachment-image pixels from that exact capture after a host-owned approval. The tool converts model-visible attachment pixels to native capture pixels from trusted stored metadata; it never accepts a model scale or native coordinate. |
 | `computer_act` | Safe `click`, `focus`, `type`, `key`, or `scroll` against one fresh ref. Re-observes identity before every action; `scroll` moves the containing AX scroll area and reports `unknown` until re-observation proves the content moved. |
-| `computer_evidence` | Interactive-session, Accessibility, and Screen Recording readiness; Helper executable/bundle/signing/process/caller/resolution identity; and recent receipts for the current Agent only. |
+| `computer_evidence` | Interactive-session, Accessibility, and Screen Recording readiness; Helper executable/bundle/signing/process/caller/resolution identity; and recent AX/visual action receipts for the current Agent only. |
 
 Model arguments never contain an Agent id, an AX path, a PID lease, or a caller-supplied `sensitive` flag. The host supplies the live Agent identity; raw AX locators stay inside the driver.
 
 `computer_visual_observe` accepts only `observation_id` and an optional `max_marks` (1–200, default 80). It accepts no path, app, window, coordinate, action ref, or approval input. The exact request-header provider/model route is checked before any screenshot; a missing attachment/LLM service, unknown route, or text-only model fails clearly without affecting `computer_observe`. The returned JSON contains durable attachment metadata, native/attachment dimensions and scale, and number → opaque-ref/source-index mappings—never a path, base64 payload, or screenshot byte buffer. DSH may normalize or downscale the stored image, but the numbered labels are already baked into it.
+
+`computer_visual_act` accepts `op`, `observation_id`, `capture_sha256`, `point`, and for `op=drag` a `to`, or for `op=scroll` `direction`/`amount`. The `point`/`to` values are pixels in the delivered attachment image the model saw. The tool maps them to native capture pixels using only the trusted attachment geometry stored by `computer_visual_observe`; no caller-provided scale or native coordinate is accepted. It never takes an app, window, path, ref, approval, Agent id, or image understanding result from model arguments. Every visual action is an AX-opaque unknown target, so it always requires host approval, is re-validated/re-captured before and after approval, and returns `unknown` after dispatch — never `confirmed`, and never safe to retry blindly.
 
 ## Safety and outcome semantics
 
@@ -76,6 +79,7 @@ Model arguments never contain an Agent id, an AX path, a PID lease, or a caller-
 - Action preflight compares exact bundle id, PID, launch identity, window identity, role/subrole, name, identifier, frame, and secure role.
 - Clicks whose live AX name/identifier semantics match destructive, financial, send, publish, or share operations; `Return`/`Enter` commit keys; and key chords outside the explicit navigation allowlist require an informed, host-owned `allowed-once` decision. Safe focus/navigation actions do not prompt. The model cannot supply or forge an approval argument.
 - Approval is bound to the live Agent/tool call plus the observation fingerprint, action digest, risk category, opaque ref digest, and a one-request nonce. The driver re-observes before asking and again after approval; a changed/expired/disposed target consumes the decision without dispatching the action.
+- Every visual point action is treated as an AX-opaque unknown target: it always requires one host-owned `allowed-once` decision, and the driver re-observes/re-captures the exact bound window before asking and again immediately before dispatch. Secure fields discovered under the point or a drag endpoint are hard-denied.
 - Secure text entry remains permanently denied and cannot be approved.
 - A successful input dispatch is not automatically a successful user outcome. `unknown` is returned when the helper cannot prove the visible effect.
 - A click is confirmed only when the same revalidated target exposes an action-specific value transition. A missing, replaced, moved, or merely focused target remains `unknown`.
@@ -105,7 +109,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 })
 ```
 
-`contractVersion` is currently `4`. v3 added the `scroll` action; v4 makes evidence honest about truncation (`computer_evidence` now carries `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`), makes observation eviction TTL-first rather than count-based (a TTL-valid ref survives later observes, and a ref evicted by the memory ceiling reports `OBSERVATION_EVICTED` instead of a false `unknown reference`), and reports every unmarked Set-of-Mark target in `omitted` with a reason from a closed vocabulary covering both the controller and the native capture. Omitted-reason vocabulary: `mark-budget-exceeded`, `static-label`, `target_has_no_frame`, `target_outside_captured_window`, `stale_target: …`. Consumers must branch on that value before relying on later fields.
+`contractVersion` is currently `5`. v3 added the `scroll` action; v4 made evidence honest about truncation (`computer_evidence` now carries `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`), made observation eviction TTL-first rather than count-based, and reports every unmarked Set-of-Mark target in `omitted` with a reason from a closed vocabulary. v5 adds the coordinate-based `computer_visual_act` fallback for AX-opaque custom views: `computer_visual_observe` persists a capture binding keyed by the delivered PNG SHA-256, the DSH tool converts attachment pixels to native capture pixels using trusted stored metadata, and the driver re-captures/re-validates the exact window before and after a required host approval before dispatching `click`/`drag`/`scroll`. Visual dispatch receipts are `unknown`, never `confirmed`; the consumer re-observes to decide the effect and must not retry an `unknown` blindly. Evidence now returns the typed AX/visual receipt union from the same bounded ring, so visual actions are not hidden from `computer_evidence`. Omitted-reason vocabulary: `mark-budget-exceeded`, `static-label`, `target_has_no_frame`, `target_outside_captured_window`, `stale_target: …`. Consumers must branch on that value before relying on later fields.
 
 Observation retention is also byte-budgeted per Agent scope (32 MiB of serialized payload): when a new observation would exceed the budget, the oldest TTL-valid observations are evicted first — still reported as `OBSERVATION_EVICTED` — and the most recent observation is never evicted.
 

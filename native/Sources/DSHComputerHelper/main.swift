@@ -42,6 +42,15 @@ private struct CapturePayload: Codable {
     let outputPath: String
 }
 
+private struct VisualActPayload: Decodable {
+    let app: AppIdentity
+    let window: WindowIdentity
+    let captureSha256: String
+    let targets: [CaptureTargetPayload]
+    let action: NativeVisualActionPayload
+    let approval: HostApprovalGrant?
+}
+
 private struct Request: Decodable {
     let id: String
     let command: String
@@ -53,6 +62,7 @@ private struct Request: Decodable {
     let action: ActionPayload?
     let approval: HostApprovalGrant?
     let capture: CapturePayload?
+    let visual: VisualActPayload?
 }
 
 private struct ErrorPayload: Codable {
@@ -842,7 +852,7 @@ private func observe(_ request: Request) throws -> ObserveResult {
     )
 }
 
-private func capture(_ request: Request) throws -> CaptureResult {
+private func capture(_ request: Request) async throws -> CaptureResult {
     try requireInteractiveSession()
     guard let payload = request.capture else {
         throw HelperFailure(code: "invalid_capture", message: "capture payload is required")
@@ -924,7 +934,7 @@ private func capture(_ request: Request) throws -> CaptureResult {
     // Re-check after AX resolution and immediately before the CG capture. A
     // lock transition must not fall through to a background-window screenshot.
     try requireInteractiveSession()
-    let output = try WindowCaptureEngine.capture(
+    let output = try await WindowCaptureEngine.capture(
         windowNumber: explicitWindowNumber,
         ownerPID: liveApp.pid,
         expectedPointFrame: livePointFrame,
@@ -959,6 +969,390 @@ private func capture(_ request: Request) throws -> CaptureResult {
         marks: output.marks,
         omitted: omitted
     )
+}
+
+private func makeProtectedCaptureDirectory() throws -> String {
+    let directoryName = "dsh-computer-capture-" + UUID().uuidString
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(directoryName, isDirectory: true)
+        .path
+    guard mkdir(directory, S_IRWXU) == 0 else {
+        throw HelperFailure(code: "temporary_directory_failed", message: "could not create a protected native capture directory")
+    }
+    return directory
+}
+
+private func captureRequest(
+    payload: CapturePayload,
+    id: String = "visual-internal-capture"
+) -> Request {
+    Request(
+        id: id,
+        command: "capture",
+        app: nil,
+        window: nil,
+        maxDepth: nil,
+        maxNodes: nil,
+        expected: nil,
+        action: nil,
+        approval: nil,
+        capture: payload,
+        visual: nil
+    )
+}
+
+private func resolveVisualWindow(
+    app: AppIdentity,
+    window: WindowIdentity
+) throws -> (running: NSRunningApplication, liveApp: AppIdentity, appElement: AXUIElement, liveWindowElement: AXUIElement, liveWindow: WindowIdentity) {
+    try requireInteractiveSession()
+    guard AXIsProcessTrusted() else {
+        throw HelperFailure(code: "accessibility_permission_required", message: accessibilityPermissionMessage())
+    }
+    guard let running = NSRunningApplication(processIdentifier: app.pid), !running.isTerminated else {
+        throw HelperFailure(code: "stale_application", message: "observed application process is no longer running")
+    }
+    let liveApp = try appIdentity(running)
+    if case let .stale(reason) = IdentityVerifier.app(expected: app, live: liveApp) {
+        throw HelperFailure(code: "stale_application", message: reason)
+    }
+    guard let explicitNumber = window.number else {
+        throw HelperFailure(code: "window_number_required", message: "visual action requires an observed window with an explicit number")
+    }
+    let appElement = AXUIElementCreateApplication(running.processIdentifier)
+    let liveWindowElement = try resolveExpectedWindow(app: appElement, expected: window)
+    let liveWindow = windowIdentity(liveWindowElement)
+    if case let .stale(reason) = IdentityVerifier.window(expected: window, live: liveWindow) {
+        throw HelperFailure(code: "stale_window", message: reason)
+    }
+    guard liveWindow.number == explicitNumber, liveWindow.frame != nil else {
+        throw HelperFailure(code: "stale_window", message: "live Accessibility window lost its explicit number or point frame")
+    }
+    return (running, liveApp, appElement, liveWindowElement, liveWindow)
+}
+
+private func secureNodeUnder(point: VisualGlobalPoint, window: AXUIElement) -> ElementIdentity? {
+    let walk = ObservationWalk(
+        maxDepth: 8,
+        maxNodes: 500,
+        children: { readChildren($0) }
+    )
+    let result = walk.walk(window: window)
+    for visited in result.visited {
+        let identity = identityOf(visited.element)
+        guard identity.secure, let frame = identity.frame else { continue }
+        if point.x >= frame.x, point.x <= frame.x + frame.width,
+           point.y >= frame.y, point.y <= frame.y + frame.height {
+            return identity
+        }
+    }
+    return nil
+}
+
+private func visualPointHitResolvesToExpectedWindow(
+    at point: VisualGlobalPoint,
+    expectedNumber: Int,
+    expectedPID: pid_t,
+    expectedWindow: AXUIElement
+) -> Bool {
+    guard point.x.isFinite, point.y.isFinite else { return false }
+    let screenPoint = CGPoint(x: point.x, y: point.y)
+
+    // Keep the existing actual-CG existence/bounds gate, but do not decide
+    // occlusion from CGWindowList ordering alone: a full-screen Dock/backdrop
+    // record can precede the real target while Accessibility still reports the
+    // target as the element under the point.
+    guard let records = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+        return false
+    }
+    let expectedWindowIsOnScreenAtPoint = records.contains { record in
+        guard let number = (record[kCGWindowNumber as String] as? NSNumber)?.intValue,
+              number == expectedNumber,
+              let ownerPID = (record[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+              ownerPID == expectedPID,
+              let boundsDictionary = record[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
+              bounds.contains(screenPoint) else { return false }
+        return true
+    }
+    guard expectedWindowIsOnScreenAtPoint else { return false }
+
+    let systemWide = AXUIElementCreateSystemWide()
+    var hit: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(
+        systemWide,
+        Float(screenPoint.x),
+        Float(screenPoint.y),
+        &hit
+    ) == .success, let hit else {
+        return false
+    }
+    return VisualPointHitProof.resolvesToExpectedWindow(
+        from: hit,
+        expectedPID: expectedPID,
+        expectedWindow: expectedWindow,
+        elementPID: { element -> Int32? in
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+            return pid
+        },
+        windowAttribute: { elementAttribute($0, kAXWindowAttribute as CFString) },
+        parentAttribute: { elementAttribute($0, kAXParentAttribute as CFString) },
+        elementsEqual: { CFEqual($0, $1) }
+    )
+}
+
+private func visualGlobalPoints(
+    action: NativeVisualActionPayload,
+    output: CaptureResult
+) throws -> [VisualGlobalPoint] {
+    let firstPoint = action.point
+    var points = [VisualGlobalPoint]()
+    guard let start = VisualCoordinateMapper.globalPoint(
+        native: firstPoint,
+        pointFrame: output.pointFrame,
+        scaleX: output.scaleX,
+        scaleY: output.scaleY,
+        pixelWidth: output.pixelWidth,
+        pixelHeight: output.pixelHeight
+    ) else {
+        throw HelperFailure(code: "invalid_visual_point", message: "visual action point is outside the captured window bounds")
+    }
+    points.append(start)
+    if action.op == "drag" {
+        guard let to = action.to else {
+            throw HelperFailure(code: "invalid_visual_action", message: "drag requires a destination point")
+        }
+        guard let destination = VisualCoordinateMapper.globalPoint(
+            native: to,
+            pointFrame: output.pointFrame,
+            scaleX: output.scaleX,
+            scaleY: output.scaleY,
+            pixelWidth: output.pixelWidth,
+            pixelHeight: output.pixelHeight
+        ) else {
+            throw HelperFailure(code: "invalid_visual_point", message: "drag endpoint is outside the captured window bounds")
+        }
+        points.append(destination)
+    }
+    return points
+}
+
+private func postMouseClick(at point: VisualGlobalPoint) throws {
+    let location = CGPoint(x: point.x, y: point.y)
+    guard let source = CGEventSource(stateID: .hidSystemState),
+          let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: location, mouseButton: .left),
+          let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: location, mouseButton: .left) else {
+        throw HelperFailure(code: "mouse_event_failed", message: "could not create mouse click event")
+    }
+    down.post(tap: .cghidEventTap)
+    up.post(tap: .cghidEventTap)
+}
+
+private func postMouseDrag(from start: VisualGlobalPoint, to destination: VisualGlobalPoint) throws {
+    let startPoint = CGPoint(x: start.x, y: start.y)
+    let destinationPoint = CGPoint(x: destination.x, y: destination.y)
+    guard let source = CGEventSource(stateID: .hidSystemState),
+          let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: startPoint, mouseButton: .left),
+          let dragged = CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: destinationPoint, mouseButton: .left),
+          let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: destinationPoint, mouseButton: .left) else {
+        throw HelperFailure(code: "mouse_event_failed", message: "could not create drag event")
+    }
+    var mouseIsDown = false
+    defer {
+        if mouseIsDown {
+            up.post(tap: .cghidEventTap)
+        }
+    }
+    down.post(tap: .cghidEventTap)
+    mouseIsDown = true
+    dragged.post(tap: .cghidEventTap)
+    up.post(tap: .cghidEventTap)
+    mouseIsDown = false
+}
+
+private func postVisualScroll(at point: VisualGlobalPoint, direction: String, amount: ScrollAmount) throws {
+    let location = CGPoint(x: point.x, y: point.y)
+    let units: CGScrollEventUnit
+    let magnitude: Int32
+    switch amount {
+    case .line:
+        units = .line
+        magnitude = 3
+    case .page:
+        units = .line
+        magnitude = 10
+    case .points(let points):
+        units = .pixel
+        let rounded = Int32(max(1.0, min(2_000.0, points.rounded())))
+        magnitude = rounded
+    }
+    let signed = direction == "up" ? magnitude : -magnitude
+    guard let source = CGEventSource(stateID: .hidSystemState),
+          let event = CGEvent(
+            scrollWheelEvent2Source: source,
+            units: units,
+            wheelCount: 1,
+            wheel1: signed,
+            wheel2: 0,
+            wheel3: 0
+          ) else {
+        throw HelperFailure(code: "scroll_event_failed", message: "could not create visual scroll event")
+    }
+    event.location = location
+    event.post(tap: .cghidEventTap)
+}
+
+private func visualActionResult(_ request: Request) async -> ActionResult {
+    guard let payload = request.visual else {
+        return ActionResult(
+            status: "rejected",
+            reason: "visual-act requires a visual payload",
+            accepted: false,
+            post: nil
+        )
+    }
+    guard payload.action.op == "click" || payload.action.op == "drag" || payload.action.op == "scroll" else {
+        return ActionResult(
+            status: "rejected",
+            reason: "unsupported visual action op: \(payload.action.op)",
+            accepted: false,
+            post: nil
+        )
+    }
+    do {
+        if let rejection = VisualActionPolicy.rejection(
+            captureSha256: payload.captureSha256,
+            action: payload.action,
+            window: payload.window,
+            approval: payload.approval
+        ) {
+            return ActionResult(status: "rejected", reason: rejection, accepted: false, post: nil)
+        }
+        guard payload.captureSha256.utf8.count == 64,
+              payload.captureSha256.utf8.allSatisfy({
+                  ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+              }) else {
+            return ActionResult(
+                status: "rejected",
+                reason: "visual capture SHA-256 must be lowercase hex",
+                accepted: false,
+                post: nil
+            )
+        }
+
+        // Resolve before recapturing so identity/liveness and the recapture
+        // use the same app/window context as closely as possible.
+        _ = try resolveVisualWindow(app: payload.app, window: payload.window)
+        let protectedDirectory = try makeProtectedCaptureDirectory()
+        defer { try? FileManager.default.removeItem(atPath: protectedDirectory) }
+        let capturePayload = CapturePayload(
+            app: payload.app,
+            window: payload.window,
+            targets: payload.targets,
+            outputPath: protectedDirectory + "/capture.png"
+        )
+        let output = try await capture(captureRequest(payload: capturePayload))
+        guard output.artifact.sha256 == payload.captureSha256 else {
+            return ActionResult(
+                status: "rejected",
+                reason: "recaptured overlay SHA-256 does not match the delivered capture; window content changed",
+                accepted: false,
+                post: nil
+            )
+        }
+
+        let points = try visualGlobalPoints(action: payload.action, output: output)
+        if let failure = VisualActionPathValidator.failure(
+            action: payload.action,
+            pixelWidth: output.pixelWidth,
+            pixelHeight: output.pixelHeight
+        ) {
+            return ActionResult(status: "rejected", reason: failure, accepted: false, post: nil)
+        }
+
+        // Re-resolve after the fresh capture. A window move or process relaunch
+        // after capture must not be dispatched through stale geometry.
+        let after = try resolveVisualWindow(app: payload.app, window: payload.window)
+        guard let liveFrame = after.liveWindow.frame,
+              liveFrame.approximatelyEquals(output.pointFrame, tolerance: 2.0) else {
+            return ActionResult(
+                status: "rejected",
+                reason: "window geometry changed after the fresh recapture; visual action was not dispatched",
+                accepted: false,
+                post: nil
+            )
+        }
+        for point in points {
+            if secureNodeUnder(point: point, window: after.liveWindowElement) != nil {
+                return ActionResult(
+                    status: "rejected",
+                    reason: "secure text field under the visual point is permanently blocked; visual action was not dispatched",
+                    accepted: false,
+                    post: nil
+                )
+            }
+            guard visualPointHitResolvesToExpectedWindow(
+                at: point,
+                expectedNumber: payload.window.number ?? -1,
+                expectedPID: after.liveApp.pid,
+                expectedWindow: after.liveWindowElement
+            ) else {
+                return ActionResult(
+                    status: "rejected",
+                    reason: "target window is not the visible window resolved by system Accessibility at the visual point; visual action was not dispatched",
+                    accepted: false,
+                    post: nil
+                )
+            }
+        }
+
+        // One final session check immediately before posting.
+        try requireInteractiveSession()
+
+        switch payload.action.op {
+        case "click":
+            try postMouseClick(at: points[0])
+        case "drag":
+            try postMouseDrag(from: points[0], to: points[1])
+        case "scroll":
+            try postVisualScroll(
+                at: points[0],
+                direction: payload.action.direction ?? "",
+                amount: payload.action.amount ?? .page
+            )
+        default:
+            break
+        }
+
+        return ActionResult(
+            status: "unknown",
+            reason: "visual action was dispatched; visible outcome requires re-observation",
+            accepted: true,
+            post: nil
+        )
+    } catch let failure as HelperFailure {
+        return ActionResult(
+            status: preflightFailureStatus(failure),
+            reason: "\(failure.code): \(failure.message)",
+            accepted: false,
+            post: nil
+        )
+    } catch let failure as VisualCaptureFailure {
+        return ActionResult(
+            status: preflightFailureStatus(HelperFailure(code: failure.code, message: failure.message)),
+            reason: "\(failure.code): \(failure.message)",
+            accepted: false,
+            post: nil
+        )
+    } catch {
+        return ActionResult(
+            status: "failed",
+            reason: "visual action failed: \(error)",
+            accepted: false,
+            post: nil
+        )
+    }
 }
 
 private func locate(window: AXUIElement, locator: [Int]) throws -> AXUIElement {
@@ -1165,11 +1559,16 @@ private func unknownAfterMutation(expected: ExpectedTarget, reason: String) -> A
 
 private func preflightFailureStatus(_ failure: HelperFailure) -> String {
     if failure.code.hasPrefix("stale_") || failure.code.hasPrefix("scroll_")
+        || failure.code.hasPrefix("window_") || failure.code.hasPrefix("invalid_capture_")
         || failure.code == "accessibility_permission_required"
         || failure.code == "session_locked"
         || failure.code == "unsupported_key" || failure.code == "invalid_modifier"
         || failure.code == "focus_not_supported" || failure.code == "value_not_settable"
-        || failure.code == "invalid_action" {
+        || failure.code == "invalid_action"
+        || failure.code == "window_number_required"
+        || failure.code == "invalid_visual_point" || failure.code == "invalid_visual_action"
+        || failure.code == "screen_recording_permission_required"
+        || failure.code == "capture_unusable" {
         return "rejected"
     }
     return "failed"
@@ -1390,7 +1789,7 @@ private func emit<Result: Codable>(_ response: Response<Result>) {
     FileHandle.standardOutput.write(Data((line + "\n").utf8))
 }
 
-private func handle(_ line: String) {
+private func handle(_ line: String) async {
     let decoder = JSONDecoder()
     let request: Request
     do {
@@ -1425,7 +1824,7 @@ private func handle(_ line: String) {
         }
     case "capture":
         do {
-            emit(Response(id: request.id, ok: true, result: try capture(request), error: nil))
+            emit(Response(id: request.id, ok: true, result: try await capture(request), error: nil))
         } catch let failure as HelperFailure {
             emit(Response<CaptureResult>(
                 id: request.id, ok: false, result: nil,
@@ -1444,6 +1843,8 @@ private func handle(_ line: String) {
         }
     case "act":
         emit(Response(id: request.id, ok: true, result: actionResult(request), error: nil))
+    case "visual-act":
+        emit(Response(id: request.id, ok: true, result: await visualActionResult(request), error: nil))
     default:
         emit(Response<EmptyResult>(
             id: request.id, ok: false, result: nil,
@@ -1453,5 +1854,5 @@ private func handle(_ line: String) {
 }
 
 while let line = readLine() {
-    if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { handle(line) }
+    if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { await handle(line) }
 }

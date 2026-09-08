@@ -3,6 +3,7 @@ import type {
   ComputerAction,
   ComputerActionReceipt,
   ComputerActionStatus,
+  ComputerCapturableWindowIdentity,
   ComputerDriver,
   ComputerDriverContext,
   ComputerEvidence,
@@ -10,8 +11,12 @@ import type {
   ComputerObservation,
   ComputerObserveRequest,
   ComputerOmittedReason,
+  ComputerPoint,
   ComputerPostActionObservation,
+  ComputerScrollAmount,
   ComputerTarget,
+  ComputerVisualAction,
+  ComputerVisualActionReceipt,
   ComputerVisualCapture,
   ComputerVisualObserveRequest,
 } from './contracts.js'
@@ -22,11 +27,14 @@ import type {
   NativeActionPayload,
   NativeApprovalGrant,
   NativeActionResult,
+  NativeCaptureTarget,
   NativeElementIdentity,
   NativeObserveResult,
   NativeObservedNode,
   NativeStatusResult,
   NativeTransport,
+  NativeVisualActionPayload,
+  NativeVisualActResult,
 } from './native-protocol.js'
 import {
   classifyComputerActionRisk,
@@ -86,6 +94,8 @@ interface ObservationTargetRecord {
   sourceIndex: number
 }
 
+type ComputerDriverReceipt = ComputerActionReceipt | ComputerVisualActionReceipt
+
 interface ObservationRecord {
   id: string
   /** Per-observation random token embedded in every minted ref so an evicted
@@ -103,10 +113,31 @@ interface ObservationRecord {
   payloadBytes: number
 }
 
+/** v5 coordinate-based visual action binding, keyed by the delivered PNG SHA-256. */
+interface CaptureBindingRecord {
+  captureSha256: string
+  observationId: string
+  observationFingerprint: string
+  app: ComputerObservation['app']
+  window: ComputerCapturableWindowIdentity
+  pointFrame: ComputerCapturableWindowIdentity['frame']
+  pixelWidth: number
+  pixelHeight: number
+  scaleX: number
+  scaleY: number
+  capturedAt: string
+  expiresAtMs: number
+  /** SoM targets used to render the overlay, so a freshness re-capture re-renders an identical image. */
+  targets: NativeCaptureTarget[]
+  consumed: boolean
+}
+
 interface ScopeState {
   observations: Map<string, ObservationRecord>
   refs: Map<string, { observation: ObservationRecord; target: ObservationTargetRecord }>
-  receipts: ComputerActionReceipt[]
+  /** Live capture bindings keyed by capture SHA-256, each owned by one observation in this scope. */
+  captures: Map<string, { observation: ObservationRecord; binding: CaptureBindingRecord }>
+  receipts: ComputerDriverReceipt[]
   sequence: number
   receiptsDropped: number
   /** Running serialized-payload byte total of the retained observations. */
@@ -354,6 +385,220 @@ function normalizedActionDigest(action: ComputerAction): string {
   if (action.kind === 'key') components.push(action.key, ...(action.modifiers ?? []))
   const canonical = components.map(value => `${Buffer.byteLength(value, 'utf8')}:${value}`).join('|')
   return createHash('sha256').update(canonical, 'utf8').digest('hex')
+}
+
+/** Native-image pixel -> global top-left point through the bound capture geometry. */
+function nativePointToGlobal(
+  binding: Pick<CaptureBindingRecord, 'pointFrame' | 'scaleX' | 'scaleY'>,
+  point: ComputerPoint,
+): { x: number; y: number } {
+  return {
+    x: binding.pointFrame.x + point.x / binding.scaleX,
+    y: binding.pointFrame.y + point.y / binding.scaleY,
+  }
+}
+
+/** A secure AX node whose frame contains the global point: the point path must never bypass it. */
+function secureNodeUnderPoint(
+  nodes: readonly NativeObservedNode[],
+  point: { x: number; y: number },
+): NativeObservedNode | null {
+  for (const node of nodes) {
+    if (!node.secure || node.frame === null) continue
+    if (point.x >= node.frame.x && point.x <= node.frame.x + node.frame.width
+      && point.y >= node.frame.y && point.y <= node.frame.y + node.frame.height) {
+      return node
+    }
+  }
+  return null
+}
+
+/** Human-safe rejection reason when the visual start or a drag endpoint is over a secure field. */
+function visualSecurePointError(
+  action: ComputerVisualAction,
+  binding: CaptureBindingRecord,
+  nodes: readonly NativeObservedNode[],
+): string | null {
+  const points = action.op === 'drag'
+    ? [
+        ['point', action.point],
+        ['drag endpoint', action.to],
+      ] as const
+    : [['point', action.point]] as const
+  for (const [label, point] of points) {
+    if (secureNodeUnderPoint(nodes, nativePointToGlobal(binding, point)) !== null) {
+      return `${label} falls on a secure text field; the visual point path cannot bypass an Accessibility security rejection`
+    }
+  }
+  return null
+}
+
+function visualScrollAmountCanonical(amount: ComputerScrollAmount | undefined): string {
+  if (amount === undefined || amount === 'page') return 'page'
+  if (amount === 'line') return 'line'
+  return amount.toFixed(2)
+}
+
+/**
+ * Cross-language canonical digest for v5 visual actions. Computed over the
+ * integer native pixel coordinates and the exact capture/window identity so no
+ * float rounding can ever change an approved action. Must stay in lockstep with
+ * Swift's VisualActionApprovalBinding.digest.
+ */
+function normalizedVisualActionDigest(
+  action: ComputerVisualAction,
+  binding: CaptureBindingRecord,
+): string {
+  const components = [
+    'dsh-computer-visual-action-v1',
+    action.op,
+    action.captureSha256,
+    String(action.point.x),
+    String(action.point.y),
+  ]
+  if (action.op === 'drag') components.push(String(action.to.x), String(action.to.y))
+  if (action.op === 'scroll') {
+    components.push(action.direction, visualScrollAmountCanonical(action.amount))
+  }
+  components.push(String(binding.window.number), binding.window.identity)
+  const canonical = components.map(value => Buffer.byteLength(value, 'utf8') + ':' + value).join('|')
+  return createHash('sha256').update(canonical, 'utf8').digest('hex')
+}
+
+function readPixelPoint(value: unknown, label: string): ComputerPoint {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be a pixel object with integer x and y`)
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.x !== 'number' || typeof record.y !== 'number'
+      || !Number.isFinite(record.x) || !Number.isFinite(record.y)) {
+    throw new Error(`${label} must carry finite numeric x and y`)
+  }
+  return { x: record.x, y: record.y }
+}
+
+/** Snapshot a visual action before the first await and sever array/object aliases. */
+function immutableVisualActionSnapshot(input: ComputerVisualAction): ComputerVisualAction {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('visual action must be an object')
+  }
+  if (input.kind !== 'point') throw new Error('visual action kind must be point')
+  const op = input.op
+  if (op !== 'click' && op !== 'drag' && op !== 'scroll') {
+    throw new Error('visual action op must be click, drag, or scroll')
+  }
+  if (typeof input.observationId !== 'string' || input.observationId.trim() === '') {
+    throw new Error('visual action requires a non-empty observationId')
+  }
+  if (typeof input.captureSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(input.captureSha256)) {
+    throw new Error('captureSha256 must be the exact 64-hex digest from computer_visual_observe')
+  }
+  const point = readPixelPoint(input.point, 'point')
+  let snapshot: ComputerVisualAction
+  switch (op) {
+    case 'click': {
+      snapshot = { kind: 'point', op: 'click', observationId: input.observationId, captureSha256: input.captureSha256, point }
+      break
+    }
+    case 'drag': {
+      snapshot = { kind: 'point', op: 'drag', observationId: input.observationId, captureSha256: input.captureSha256, point, to: readPixelPoint(input.to, 'drag endpoint') }
+      break
+    }
+    case 'scroll': {
+      if (input.direction !== 'up' && input.direction !== 'down') {
+        throw new Error('visual scroll requires direction up or down')
+      }
+      const amount = input.amount
+      if (amount !== undefined && amount !== 'line' && amount !== 'page'
+        && (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0)) {
+        throw new Error('visual scroll amount must be line, page, or a positive number')
+      }
+      snapshot = amount === undefined
+        ? { kind: 'point', op: 'scroll', observationId: input.observationId, captureSha256: input.captureSha256, point, direction: input.direction }
+        : { kind: 'point', op: 'scroll', observationId: input.observationId, captureSha256: input.captureSha256, point, direction: input.direction, amount }
+      break
+    }
+  }
+  Object.freeze(snapshot)
+  Object.freeze(snapshot.point)
+  if (snapshot.op === 'drag') Object.freeze(snapshot.to)
+  return snapshot
+}
+
+function nativeVisualAction(action: ComputerVisualAction): NativeVisualActionPayload {
+  switch (action.op) {
+    case 'click': return { op: 'click', point: { x: action.point.x, y: action.point.y } }
+    case 'drag': return { op: 'drag', point: { x: action.point.x, y: action.point.y }, to: { x: action.to.x, y: action.to.y } }
+    case 'scroll': return { op: 'scroll', point: { x: action.point.x, y: action.point.y }, direction: action.direction, amount: action.amount ?? 'page' }
+  }
+}
+
+function nativePixelPointError(
+  point: ComputerPoint,
+  binding: CaptureBindingRecord,
+  label: string,
+): string | null {
+  if (typeof point !== 'object' || point === null
+      || !Number.isSafeInteger(point.x) || !Number.isSafeInteger(point.y)) {
+    return label + ' must carry integer native-image pixel coordinates'
+  }
+  if (point.x < 0 || point.y < 0 || point.x >= binding.pixelWidth || point.y >= binding.pixelHeight) {
+    return label + ' is outside the captured window bounds'
+  }
+  return null
+}
+
+function visualActionShapeError(action: ComputerVisualAction, binding: CaptureBindingRecord): string | null {
+  const pointError = nativePixelPointError(action.point, binding, 'point')
+  if (pointError !== null) return pointError
+  if (action.op === 'drag') {
+    const toError = nativePixelPointError(action.to, binding, 'drag endpoint')
+    if (toError !== null) return toError
+  }
+  if (action.op === 'scroll') {
+    if (action.direction !== 'up' && action.direction !== 'down') {
+      return 'scroll requires direction up or down'
+    }
+    const amount = action.amount
+    if (amount !== undefined && amount !== 'line' && amount !== 'page'
+      && (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0)) {
+      return 'scroll amount must be line, page, or a positive number of points'
+    }
+  }
+  return null
+}
+
+function informedVisualApprovalReason(
+  action: ComputerVisualAction,
+  observation: ObservationRecord,
+  binding: CaptureBindingRecord,
+): string {
+  const global = nativePointToGlobal(binding, action.point)
+  const app = approvalField(observation.native.app.bundleId, 32, 'unknown')
+  const title = approvalField(observation.native.window.title, 24, 'untitled')
+  const number = observation.native.window.number === null ? '?' : String(observation.native.window.number)
+  let detail: string
+  if (action.op === 'drag') {
+    const to = nativePointToGlobal(binding, action.to)
+    detail = 'op=drag from=(' + global.x.toFixed(1) + ',' + global.y.toFixed(1) + ') to=(' + to.x.toFixed(1) + ',' + to.y.toFixed(1) + ')'
+  } else if (action.op === 'scroll') {
+    detail = 'op=scroll at=(' + global.x.toFixed(1) + ',' + global.y.toFixed(1) + ') direction=' + action.direction + ' amount=' + String(action.amount ?? 'page')
+  } else {
+    detail = 'op=click at=(' + global.x.toFixed(1) + ',' + global.y.toFixed(1) + ')'
+  }
+  return singleLine(
+    'Approve once: visual ' + detail + '; app=' + app + '; window=#' + number + " title='" + title + "'; "
+      + 'capture=' + binding.captureSha256.slice(0, 12) + '…',
+  )
+}
+
+function visualApprovalDenialReason(outcome: 'rejected' | 'cancelled' | 'unavailable'): string {
+  const prefix = outcome === 'rejected'
+    ? 'the user rejected this visual action'
+    : outcome === 'cancelled'
+      ? 'approval for this visual action was cancelled'
+      : 'host approval is unavailable'
+  return prefix + '; action was not dispatched'
 }
 
 function frameMatches(
@@ -653,7 +898,7 @@ export class ComputerController implements ComputerDriver {
     const existing = this.#scopes.get(scope)
     if (existing) return existing
     const created: ScopeState = {
-      observations: new Map(), refs: new Map(), receipts: [], sequence: 0,
+      observations: new Map(), refs: new Map(), captures: new Map(), receipts: [], sequence: 0,
       receiptsDropped: 0, evictedObservations: new Set(), busyObservations: new Set(),
       payloadBytes: 0,
     }
@@ -668,6 +913,9 @@ export class ComputerController implements ComputerDriver {
   #dropObservation(state: ScopeState, observation: ObservationRecord): void {
     const removed = state.observations.delete(observation.id)
     for (const ref of observation.targets.keys()) state.refs.delete(ref)
+    for (const [sha256, entry] of state.captures) {
+      if (entry.observation === observation) state.captures.delete(sha256)
+    }
     if (removed) {
       state.payloadBytes = Math.max(0, state.payloadBytes - observation.payloadBytes)
     }
@@ -870,6 +1118,27 @@ export class ComputerController implements ComputerDriver {
       const afterCapture = bindingFailure()
       if (afterCapture !== null) throw new Error(afterCapture)
 
+      // Persist the capture binding so a later computer_visual_act can resolve
+      // native-image pixels through the exact, verified capture geometry. The
+      // binding is keyed by the delivered PNG SHA-256 and owns one observation.
+      const binding: CaptureBindingRecord = {
+        captureSha256: captured.result.artifact.sha256,
+        observationId: observation.id,
+        observationFingerprint: observation.fingerprint,
+        app: structuredClone(captured.result.app),
+        window: structuredClone(captured.result.window),
+        pointFrame: structuredClone(captured.result.pointFrame),
+        pixelWidth: captured.result.pixelWidth,
+        pixelHeight: captured.result.pixelHeight,
+        scaleX: captured.result.scaleX,
+        scaleY: captured.result.scaleY,
+        capturedAt: captured.result.capturedAt,
+        expiresAtMs: observation.expiresAtMs,
+        targets: targets.map(target => structuredClone(target)),
+        consumed: false,
+      }
+      state.captures.set(binding.captureSha256, { observation, binding })
+
       return {
         observationId: observation.id,
         observationFingerprint: observation.fingerprint,
@@ -968,6 +1237,39 @@ export class ComputerController implements ComputerDriver {
     return live
   }
 
+  /** Read-only app+window re-observation used before asking and immediately before a visual dispatch. */
+  async #preflightWindow(
+    scope: string,
+    observation: ObservationRecord,
+    signal: AbortSignal | undefined,
+  ): Promise<NativeObserveResult> {
+    const expectedWindow = observation.native.window
+    const app = observation.native.app
+    const nativeResult = await this.#native.request<NativeObserveResult>({
+      id: this.#id(),
+      command: 'observe',
+      app: { bundleId: app.bundleId, pid: app.pid },
+      // Visual captures always have an explicit window number; bind by it so a
+      // title-only match can never resolve the wrong same-titled window.
+      window: expectedWindow.number === null ? {} : { number: expectedWindow.number },
+      maxDepth: observation.limits.maxDepth,
+      maxNodes: observation.limits.maxNodes,
+    }, {
+      scopeId: scope,
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const result = structuredClone(nativeResult)
+    const appReason = appChangedReason(observation.native.app, result.app)
+    if (appReason !== null) {
+      throw new LivePreflightError(`live application identity changed: ${appReason}; run computer_observe again`)
+    }
+    const windowReason = windowChangedReason(observation.native.window, result.window)
+    if (windowReason !== null) {
+      throw new LivePreflightError(`live window identity changed: ${windowReason}; run computer_observe again`)
+    }
+    return result
+  }
+
   #receipt(
     state: ScopeState,
     input: {
@@ -988,6 +1290,41 @@ export class ComputerController implements ComputerDriver {
       ref: input.action.ref,
       observationId: input.observation?.id ?? null,
       observationFingerprint: input.observation?.fingerprint ?? null,
+      startedAt: input.startedAt,
+      finishedAt: new Date(this.#now()).toISOString(),
+      reason: input.reason,
+      nativeAccepted: input.nativeAccepted,
+      postAction: input.postAction,
+    }
+    const storedReceipt = structuredClone(receipt)
+    state.receipts.push(storedReceipt)
+    if (state.receipts.length > MAX_RECEIPTS_PER_SCOPE) {
+      state.receiptsDropped += state.receipts.length - MAX_RECEIPTS_PER_SCOPE
+      state.receipts.splice(0, state.receipts.length - MAX_RECEIPTS_PER_SCOPE)
+    }
+    return structuredClone(storedReceipt)
+  }
+
+  #visualReceipt(
+    state: ScopeState,
+    input: {
+      status: ComputerActionStatus
+      action: ComputerVisualAction | null
+      observation: ObservationRecord | null
+      startedAt: string
+      reason: string
+      nativeAccepted: boolean
+      postAction: ComputerPostActionObservation | null
+    },
+  ): ComputerVisualActionReceipt {
+    const receipt: ComputerVisualActionReceipt = {
+      receiptId: `receipt_${this.#id()}`,
+      sequence: ++state.sequence,
+      status: input.status,
+      action: input.action?.op ?? 'click',
+      observationId: input.observation?.id ?? null,
+      observationFingerprint: input.observation?.fingerprint ?? null,
+      captureSha256: input.action?.captureSha256 ?? null,
       startedAt: input.startedAt,
       finishedAt: new Date(this.#now()).toISOString(),
       reason: input.reason,
@@ -1320,6 +1657,292 @@ export class ComputerController implements ComputerDriver {
     }
   }
 
+  async visualAct(requestedAction: ComputerVisualAction, context: ComputerDriverContext): Promise<ComputerVisualActionReceipt> {
+    const action = immutableVisualActionSnapshot(requestedAction)
+    const scope = scopeId(context)
+    const state = this.#state(scope)
+    const startedAt = new Date(this.#now()).toISOString()
+    if (this.#disposed || this.#hostPlatform !== 'darwin') {
+      return this.#visualReceipt(state, {
+        status: 'failed', action, observation: null, startedAt,
+        reason: this.#disposed ? 'dsh-computer driver is disposed' : new ComputerPlatformError(this.#hostPlatform).message,
+        nativeAccepted: false, postAction: null,
+      })
+    }
+
+    this.#cleanExpired(state)
+    const captureEntry = state.captures.get(action.captureSha256)
+    if (captureEntry === undefined) {
+      return this.#visualReceipt(state, {
+        status: 'rejected', action, observation: null, startedAt,
+        reason: 'unknown, stale, consumed, or wrong-owner capture in this Agent scope; run computer_observe/computer_visual_observe again',
+        nativeAccepted: false, postAction: null,
+      })
+    }
+    const { observation, binding } = captureEntry
+    if (binding.consumed || binding.observationId !== action.observationId || observation.id !== action.observationId) {
+      return this.#visualReceipt(state, {
+        status: 'rejected', action, observation, startedAt,
+        reason: 'capture binding does not match this observation or was already consumed; run computer_visual_observe again',
+        nativeAccepted: false, postAction: null,
+      })
+    }
+    if (state.observations.get(observation.id) !== observation) {
+      return this.#visualReceipt(state, {
+        status: 'rejected', action, observation, startedAt,
+        reason: 'observation changed while resolving the visual capture; run computer_observe again',
+        nativeAccepted: false, postAction: null,
+      })
+    }
+    if (observation.expiresAtMs <= this.#now()) {
+      this.#dropObservation(state, observation)
+      return this.#visualReceipt(state, {
+        status: 'rejected', action, observation, startedAt,
+        reason: 'stale observation; run computer_observe again',
+        nativeAccepted: false, postAction: null,
+      })
+    }
+    const shapeError = visualActionShapeError(action, binding)
+    if (shapeError !== null) {
+      return this.#visualReceipt(state, {
+        status: 'rejected', action, observation, startedAt,
+        reason: shapeError, nativeAccepted: false, postAction: null,
+      })
+    }
+    if (state.busyObservations.has(observation.id)) {
+      return this.#visualReceipt(state, {
+        status: 'rejected', action, observation, startedAt,
+        reason: 'another operation is already using this observation', nativeAccepted: false, postAction: null,
+      })
+    }
+    state.busyObservations.add(observation.id)
+    const scopeGeneration = this.#scopeGeneration(scope)
+
+    let approvalElapsedMs = 0
+    const hardBindingFailure = (): string | null => {
+      if (this.#disposed || this.#scopeGeneration(scope) !== scopeGeneration || this.#scopes.get(scope) !== state) {
+        return 'Agent scope was disposed before visual action dispatch'
+      }
+      if (state.captures.get(action.captureSha256) !== captureEntry) {
+        return 'capture binding was invalidated while the visual action was running'
+      }
+      return null
+    }
+    const bindingFailure = (): string | null => {
+      const hard = hardBindingFailure()
+      if (hard !== null) return hard
+      const stale = observation.expiresAtMs + approvalElapsedMs <= this.#now()
+      if (stale) {
+        this.#dropObservation(state, observation)
+        return 'observation expired before visual action dispatch; run computer_observe again'
+      }
+      return null
+    }
+
+    const captureRequest = () => ({
+      id: this.#id(),
+      capture: {
+        app: structuredClone(binding.app),
+        window: structuredClone(binding.window),
+        targets: binding.targets.map(target => structuredClone(target)),
+      },
+    })
+
+    const liveFresh = async (phase: 'pre-approval' | 'post-approval'): Promise<{
+      native: NativeObserveResult
+      secureReason: string | null
+      capturedSha256: string
+    }> => {
+      const live = await this.#preflightWindow(scope, observation, context.signal)
+      const invalid = bindingFailure()
+      if (invalid !== null) throw new LivePreflightError(invalid)
+      const captured = await this.#capture(this.#native, captureRequest(), {
+        scopeId: scope,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      })
+      const afterCapture = bindingFailure()
+      if (afterCapture !== null) throw new LivePreflightError(afterCapture)
+      if (captured.result.artifact.sha256 !== binding.captureSha256) {
+        throw new LivePreflightError(
+          `${phase} window content changed (capture ${binding.captureSha256.slice(0, 12)}… is no longer fresh); run computer_visual_observe again`,
+        )
+      }
+      return {
+        native: live,
+        secureReason: visualSecurePointError(action, binding, live.nodes),
+        capturedSha256: captured.result.artifact.sha256,
+      }
+    }
+
+    try {
+      // Visual point actions always need the exact unknown-target approval.
+      if (context.approval === undefined) {
+        return this.#visualReceipt(state, {
+          status: 'rejected', action, observation, startedAt,
+          reason: visualApprovalDenialReason('unavailable'), nativeAccepted: false, postAction: null,
+        })
+      }
+
+      let releaseWindow: (() => void) | undefined
+      try {
+        releaseWindow = await this.#windowMutex.acquire(windowLockKey(observation), scope, context.signal)
+        try {
+          const freshBefore = await liveFresh('pre-approval')
+          const invalidBeforeApproval = bindingFailure()
+          if (invalidBeforeApproval !== null) {
+            return this.#visualReceipt(state, {
+              status: 'rejected', action, observation, startedAt,
+              reason: invalidBeforeApproval, nativeAccepted: false, postAction: null,
+            })
+          }
+          if (freshBefore.secureReason !== null) {
+            return this.#visualReceipt(state, {
+              status: 'rejected', action, observation, startedAt,
+              reason: freshBefore.secureReason,
+              nativeAccepted: false, postAction: null,
+            })
+          }
+        } catch (error) {
+          const reason = error instanceof NativeHelperError ? `${error.code}: ${error.message}` : errorMessage(error)
+          return this.#visualReceipt(state, {
+            status: preflightReceiptStatus(error), action, observation, startedAt,
+            reason: error instanceof LivePreflightError ? `the view changed before approval: ${reason}` : reason,
+            nativeAccepted: false, postAction: null,
+          })
+        }
+      } finally {
+        releaseWindow?.()
+      }
+
+      let outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' = 'unavailable'
+      if (context.approval !== undefined) {
+        const approvalStartedAtMs = this.#now()
+        try {
+          outcome = await context.approval.request(informedVisualApprovalReason(action, observation, binding))
+        } catch {
+          outcome = 'unavailable'
+        }
+        approvalElapsedMs = Math.max(0, this.#now() - approvalStartedAtMs)
+      }
+      if (outcome !== 'allowed-once') {
+        return this.#visualReceipt(state, {
+          status: 'rejected', action, observation, startedAt,
+          reason: visualApprovalDenialReason(outcome), nativeAccepted: false, postAction: null,
+        })
+      }
+      const invalidAfterApproval = bindingFailure()
+      if (invalidAfterApproval !== null) {
+        return this.#visualReceipt(state, {
+          status: 'rejected', action, observation, startedAt,
+          reason: `approved visual action was not dispatched: ${invalidAfterApproval}`,
+          nativeAccepted: false, postAction: null,
+        })
+      }
+
+      try {
+        releaseWindow = await this.#windowMutex.acquire(windowLockKey(observation), scope, context.signal)
+      } catch (error) {
+        return this.#visualReceipt(state, {
+          status: 'rejected', action, observation, startedAt,
+          reason: errorMessage(error), nativeAccepted: false, postAction: null,
+        })
+      }
+
+      try {
+        let freshAfter: Awaited<ReturnType<typeof liveFresh>>
+        try {
+          freshAfter = await liveFresh('post-approval')
+          const invalidAfterFresh = bindingFailure()
+          if (invalidAfterFresh !== null) {
+            return this.#visualReceipt(state, {
+              status: 'rejected', action, observation, startedAt,
+              reason: `approved visual action was not dispatched: ${invalidAfterFresh}`,
+              nativeAccepted: false, postAction: null,
+            })
+          }
+          if (freshAfter.secureReason !== null) {
+            return this.#visualReceipt(state, {
+              status: 'rejected', action, observation, startedAt,
+              reason: `approved visual action was not dispatched: ${freshAfter.secureReason}`,
+              nativeAccepted: false, postAction: null,
+            })
+          }
+        } catch (error) {
+          const reason = error instanceof NativeHelperError ? `${error.code}: ${error.message}` : errorMessage(error)
+          return this.#visualReceipt(state, {
+            status: preflightReceiptStatus(error), action, observation, startedAt,
+            reason: error instanceof LivePreflightError
+              ? `the view changed while you were deciding: ${reason}`
+              : `approved visual action was not dispatched: ${reason}`,
+            nativeAccepted: false, postAction: null,
+          })
+        }
+
+        const approval: NativeApprovalGrant = {
+          outcome: 'allowed-once',
+          observationId: observation.id,
+          refDigest: createHash('sha256').update(`${scope}\u0000${observation.id}\u0000visual-act\u0000${binding.captureSha256}`).digest('hex'),
+          riskCode: 'visual-point-action',
+          observationFingerprint: observation.fingerprint,
+          actionDigest: normalizedVisualActionDigest(action, binding),
+          nonce: randomBytes(32).toString('base64url'),
+        }
+        try {
+          const nativeResult = await this.#native.request<NativeVisualActResult>({
+            id: this.#id(),
+            command: 'visual-act',
+            visual: {
+              app: structuredClone(freshAfter.native.app),
+              window: structuredClone(freshAfter.native.window as ComputerCapturableWindowIdentity),
+              captureSha256: binding.captureSha256,
+              targets: binding.targets.map(target => structuredClone(target)),
+              action: nativeVisualAction(action),
+              approval,
+            },
+          }, {
+            scopeId: scope,
+            ...(context.signal === undefined ? {} : { signal: context.signal }),
+          })
+          const result = structuredClone(nativeResult)
+          // A visual coordinate path never has AX-specific proof; even a
+          // native helper that reports confirmed is treated as unknown until
+          // the consumer re-observes the actual UI effect.
+          const status: ComputerActionStatus = result.status === 'confirmed' ? 'unknown' : result.status
+          const reason = result.status === 'confirmed'
+            ? `native helper reported visual dispatch confirmation; visible outcome still requires re-observation: ${result.reason}`
+            : result.reason
+          const receipt = this.#visualReceipt(state, {
+            status, action, observation, startedAt,
+            reason, nativeAccepted: result.accepted,
+            postAction: postAction(result.post),
+          })
+          if (result.accepted || status === 'unknown') {
+            binding.consumed = true
+            this.#dropObservation(state, observation)
+          }
+          return receipt
+        } catch (error) {
+          const reason = error instanceof NativeHelperError ? `${error.code}: ${error.message}` : errorMessage(error)
+          const outcomeUnknown = error instanceof NativeHelperError && error.mayHaveExecuted
+          const receipt = this.#visualReceipt(state, {
+            status: outcomeUnknown ? 'unknown' : 'failed', action, observation, startedAt,
+            reason: outcomeUnknown ? `visual action outcome is unknown after transport loss: ${reason}` : reason,
+            nativeAccepted: false, postAction: null,
+          })
+          if (outcomeUnknown) {
+            binding.consumed = true
+            this.#dropObservation(state, observation)
+          }
+          return receipt
+        }
+      } finally {
+        releaseWindow?.()
+      }
+    } finally {
+      state.busyObservations.delete(observation.id)
+    }
+  }
+
   async evidence(context: ComputerDriverContext, options: { limit?: number } = {}): Promise<ComputerEvidence> {
     const scope = scopeId(context)
     const state = this.#state(scope)
@@ -1361,7 +1984,9 @@ export class ComputerController implements ComputerDriver {
     // expiry cleanup so activeObservations reflects the projection instant,
     // not the instant before the status call began.
     this.#cleanExpired(state)
-    const receipts = state.receipts.slice(-limit).map(receipt => structuredClone(receipt))
+    const receipts = state.receipts
+      .slice(-limit)
+      .map(receipt => structuredClone(receipt))
     return {
       contractVersion: COMPUTER_DRIVER_CONTRACT_VERSION,
       scope: scopeLabel(scope),

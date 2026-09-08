@@ -6,6 +6,7 @@ public enum ActionRiskCode: String, Codable, Equatable, Sendable {
     case dangerousClick = "dangerous-click"
     case commitKey = "commit-key"
     case unsafeKeyChord = "unsafe-key-chord"
+    case visualPointAction = "visual-point-action"
 }
 
 public enum ActionRiskDecision: Equatable, Sendable {

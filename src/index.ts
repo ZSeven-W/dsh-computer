@@ -15,6 +15,7 @@ export { ComputerController, type ComputerControllerOptions } from './controller
 export { ComputerPlatformError, NativeHelper, NativeHelperError, type NativeHelperOptions } from './native-helper.js'
 export {
   classifyComputerActionRisk,
+  classifyComputerVisualActionRisk,
   deterministicRiskReason,
   normalizeKeyName,
   normalizeModifiers,
@@ -66,6 +67,7 @@ export function apply(ctx: HostContext): () => Promise<void> {
   const disposers: Array<() => void | Promise<void>> = [
     ctx.effect(() => ctx.tools.register(tools.computerObserve), 'dsh-computer:computer_observe'),
     ctx.effect(() => ctx.tools.register(tools.computerVisualObserve), 'dsh-computer:computer_visual_observe'),
+    ctx.effect(() => ctx.tools.register(tools.computerVisualAct), 'dsh-computer:computer_visual_act'),
     ctx.effect(() => ctx.tools.register(tools.computerAct), 'dsh-computer:computer_act'),
     ctx.effect(() => ctx.tools.register(tools.computerEvidence), 'dsh-computer:computer_evidence'),
   ]

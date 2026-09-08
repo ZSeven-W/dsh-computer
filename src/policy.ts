@@ -35,8 +35,8 @@ export type ComputerActionRisk =
     }
   | {
       readonly kind: 'approval-required'
-      readonly code: 'dangerous-click' | 'commit-key' | 'unsafe-key-chord'
-      readonly category: 'destructive' | 'financial' | 'external-commit' | 'commit-key' | 'unsafe-key-chord'
+      readonly code: 'dangerous-click' | 'commit-key' | 'unsafe-key-chord' | 'visual-point-action'
+      readonly category: 'destructive' | 'financial' | 'external-commit' | 'commit-key' | 'unsafe-key-chord' | 'visual-point-action'
       readonly reason: string
     }
 
@@ -105,6 +105,24 @@ export function classifyComputerActionRisk(
     }
   }
   return { kind: 'safe' }
+}
+
+/**
+ * Every coordinate-based visual action operates on an AX-opaque target by
+ * definition (the fallback exists precisely when there is no usable AX node).
+ * It is therefore always an unknown-AX-target action requiring one host-owned
+ * allowed-once decision. The grant binds the exact op, integer pixel coords,
+ * capture SHA-256, and window identity elsewhere; this classifier only encodes
+ * the unconditional approval requirement. A secure field discovered under the
+ * point is hard-denied by the controller/native preflight, never approved.
+ */
+export function classifyComputerVisualActionRisk(): ComputerActionRisk {
+  return {
+    kind: 'approval-required',
+    code: 'visual-point-action',
+    category: 'visual-point-action',
+    reason: 'coordinate-based visual action targets an AX-opaque location and requires one-action host approval',
+  }
 }
 
 /** Backward-compatible summary for consumers that only need deny/ask text. */

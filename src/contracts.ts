@@ -1,7 +1,7 @@
 /** Stable service name exposed through Cordis for dsh-qa and other drivers. */
 export const COMPUTER_DRIVER_SERVICE = 'zsevenComputerDriver' as const
 
-export const COMPUTER_DRIVER_CONTRACT_VERSION = 4 as const
+export const COMPUTER_DRIVER_CONTRACT_VERSION = 5 as const
 
 export interface ComputerFrame {
   x: number
@@ -223,6 +223,47 @@ export interface ComputerActionReceipt {
   postAction: ComputerPostActionObservation | null
 }
 
+/** Native-image pixel coordinate in the captured window PNG (top-origin, integer). */
+export interface ComputerPoint {
+  x: number
+  y: number
+}
+
+export type ComputerVisualOperation = 'click' | 'drag' | 'scroll'
+
+/**
+ * v5 coordinate-based visual action fallback for AX-opaque targets. `point` and
+ * `to` are native-image pixel coordinates in the exact capture identified by
+ * `captureSha256`, never attachment pixels and never global screen points. The
+ * DSH tool boundary converts attachment pixels to native pixels before this
+ * driver contract is reached, and the driver converts native pixels to global
+ * top-left points through the bound capture's pointFrame/scaleX/scaleY. Every
+ * visual action requires a host-owned allowed-once approval; the grant binds the
+ * exact op, integer pixel coordinates, capture SHA-256, and window identity.
+ */
+export type ComputerVisualAction =
+  | { kind: 'point'; op: 'click'; observationId: string; captureSha256: string; point: ComputerPoint }
+  | { kind: 'point'; op: 'drag'; observationId: string; captureSha256: string; point: ComputerPoint; to: ComputerPoint }
+  | { kind: 'point'; op: 'scroll'; observationId: string; captureSha256: string; point: ComputerPoint; direction: ComputerScrollDirection; amount?: ComputerScrollAmount }
+
+export interface ComputerVisualActionReceipt {
+  receiptId: string
+  sequence: number
+  status: ComputerActionStatus
+  action: ComputerVisualOperation
+  observationId: string | null
+  observationFingerprint: string | null
+  captureSha256: string | null
+  startedAt: string
+  finishedAt: string
+  reason: string
+  nativeAccepted: boolean
+  postAction: ComputerPostActionObservation | null
+}
+
+/** Receipt union retained in per-Agent evidence. AX receipts keep their legacy shape (with `ref`); visual receipts use `captureSha256`. */
+export type ComputerEvidenceReceipt = ComputerActionReceipt | ComputerVisualActionReceipt
+
 export interface ComputerHelperStatus {
   platform: 'macos' | 'unsupported'
   helper: 'ready' | 'not-built' | 'unavailable'
@@ -271,7 +312,7 @@ export interface ComputerEvidence {
   status: ComputerHelperStatus
   activeObservations: number
   activeNativeRequests: number
-  receipts: ComputerActionReceipt[]
+  receipts: ComputerEvidenceReceipt[]
   /** Receipts ever recorded in this scope (monotonically increasing). */
   receipts_total: number
   /** Receipts evicted from the bounded ring because it exceeded its cap. */
@@ -313,6 +354,7 @@ export interface ComputerDriver {
   observe(request: ComputerObserveRequest, context: ComputerDriverContext): Promise<ComputerObservation>
   visualObserve(request: ComputerVisualObserveRequest, context: ComputerDriverContext): Promise<ComputerVisualCapture>
   act(action: ComputerAction, context: ComputerDriverContext): Promise<ComputerActionReceipt>
+  visualAct(action: ComputerVisualAction, context: ComputerDriverContext): Promise<ComputerVisualActionReceipt>
   evidence(context: ComputerDriverContext, options?: { limit?: number }): Promise<ComputerEvidence>
   disposeScope(scopeId: string): Promise<void>
   dispose(): Promise<void>

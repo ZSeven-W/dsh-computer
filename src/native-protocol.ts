@@ -118,7 +118,7 @@ export interface NativeApprovalGrant {
   outcome: 'allowed-once'
   observationId: string
   refDigest: string
-  riskCode: 'dangerous-click' | 'commit-key' | 'unsafe-key-chord'
+  riskCode: 'dangerous-click' | 'commit-key' | 'unsafe-key-chord' | 'visual-point-action'
   observationFingerprint: string
   actionDigest: string
   nonce: string
@@ -130,6 +130,39 @@ export type NativeActionPayload =
   | { kind: 'type'; text: string }
   | { kind: 'key'; key: string; modifiers: ComputerModifier[] }
   | { kind: 'scroll'; direction: ComputerScrollDirection; amount: ComputerScrollAmount }
+
+/** Native-image pixel coordinate (top-origin, integer) inside the captured window. */
+export interface NativeVisualPoint {
+  x: number
+  y: number
+}
+
+export type NativeVisualActionPayload =
+  | { op: 'click'; point: NativeVisualPoint }
+  | { op: 'drag'; point: NativeVisualPoint; to: NativeVisualPoint }
+  | { op: 'scroll'; point: NativeVisualPoint; direction: ComputerScrollDirection; amount: ComputerScrollAmount }
+
+export interface NativeVisualActInput {
+  app: ComputerAppIdentity
+  window: NativeCapturableWindowIdentity
+  captureSha256: string
+  /** Original SoM targets, re-sent so the helper can re-render an identical overlay and compare its SHA-256. */
+  targets: NativeCaptureTarget[]
+  action: NativeVisualActionPayload
+  approval: NativeApprovalGrant | null
+}
+
+export interface NativeVisualActResult {
+  status: ComputerActionStatus
+  reason: string
+  accepted: boolean
+  post: {
+    capturedAt: string
+    app: ComputerAppIdentity
+    window: ComputerWindowIdentity
+    target: NativeElementIdentity | null
+  } | null
+}
 
 export interface NativeActionResult {
   status: ComputerActionStatus
@@ -204,6 +237,11 @@ export type NativeRequest =
       command: 'capture'
       capture: NativeCaptureInput
     }
+  | {
+      id: string
+      command: 'visual-act'
+      visual: NativeVisualActInput
+    }
 
 export interface NativeStatusResult {
   platform: 'macos'
@@ -230,7 +268,7 @@ export interface NativeStatusResult {
 export interface NativeResponse {
   id: string
   ok: boolean
-  result?: NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult
+  result?: NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult
   error?: {
     code: string
     message: string
@@ -238,7 +276,7 @@ export interface NativeResponse {
 }
 
 export interface NativeTransport {
-  request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult>(
+  request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult>(
     request: NativeRequest,
     options: { scopeId: string; signal?: AbortSignal },
   ): Promise<T>
