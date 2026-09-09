@@ -13,6 +13,15 @@
   <a href="./README.md"><b>English</b></a> &middot; <a href="./README.zh.md">简体中文</a>
 </p>
 
+<p align="center">
+  <a href="#tools">Capabilities</a> &middot; <a href="#quick-start-local-candidate">Quick start</a> &middot; <a href="#safety-and-outcome-semantics">Safety</a> &middot; <a href="#develop-and-verify">Development</a> &middot; <a href="#documentation">Documentation</a>
+</p>
+
+<p align="center">
+  <img src="./docs/images/dsh-computer-demo.png" alt="Native macOS test app with driver-generated numbered targets and a freshly observed validation result" width="760" />
+</p>
+<p align="center"><sub>Real native fixture, captured by the Computer driver in light mode. Numbered marks come from visual observation. Text entry and AX click were executed; a fresh observation verified PASS after an unknown click receipt. No release was published.</sub></p>
+
 ## Why another Computer Use driver?
 
 Seeing a button once is not authority to click it later. Windows move, applications restart, PIDs are reused, dynamic UIs rebind children, and another Agent can be operating at the same time. DSH Computer treats every observation as a short-lived capability rather than a bag of coordinates.
@@ -113,9 +122,17 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 
 Observation retention is also byte-budgeted per Agent scope (32 MiB of serialized payload): when a new observation would exceed the budget, the oldest TTL-valid observations are evicted first — still reported as `OBSERVATION_EVICTED` — and the most recent observation is never evicted.
 
-## Local install
+## Quick start (local candidate)
 
-This candidate is intentionally local-only: it has not been published or installed into `/Applications`.
+The source package declares `0.1.0-rc.1`; this guide uses a local candidate, not a verified npm release. No step below installs an app into `/Applications`.
+
+Requirements: macOS, Node.js `>=24.11.0`, pnpm `10.34.5`, and a Swift toolchain for the native Helper. Install DSH separately:
+
+```sh
+npm install -g @deepseek-ai/dsh@latest
+```
+
+Run the following from this repository, replacing the absolute path with your checkout:
 
 ```sh
 pnpm install
@@ -153,13 +170,20 @@ Acceptance includes Node unit tests, Swift pure-policy/identity tests, a real Sw
 
 - macOS only. The package still installs elsewhere so a DSH profile can explain the unsupported platform instead of failing activation; native actions remain unavailable.
 - The current desktop must be unlocked and interactively available. Lock transitions are checked before and after read paths and immediately before mutation; background automation while the login window owns the session is rejected.
-- Native window screenshots are a dedicated multimodal observation path, not a coordinate-action path. There is no OCR, coordinate clicking, dragging, clipboard automation, or full IME simulation in this slice. Scrolling is AX-native (adjusting the containing scroll area's vertical scroll bar), never a pointer or wheel event.
+- AX refs are the primary action path. For AX-opaque views, `computer_visual_act` provides capture-bound coordinate `click`, `drag`, and `scroll` after host approval; dispatch remains `unknown` until a consumer verifies the outcome. AX `scroll` adjusts the containing scroll area's vertical scroll bar. There is no built-in OCR, clipboard automation, or full IME simulation.
 - Visual observation requires an exact AX window number/frame, Screen Recording permission for the reported Helper identity, a mounted DSH attachment store, and an exact current model route that explicitly declares image input. Near-black/transparent captures fail pixel validation; near-white/near-uniform captures are retained with their warning classification.
 - `type` uses a settable Accessibility value; it is not a general replacement for natural keyboard/IME input.
 - Some applications expose incomplete AX names, identifiers, frames, window numbers, or actions. Missing strong launch identity makes action preflight fail closed.
 - Deterministic risk classification can only use the AX semantics an app exposes. An unlabeled custom control cannot be proven destructive from AX alone; use visual observation for context and treat this as a current safety limit, not a guarantee.
 - The npm candidate does not ship a prebuilt or machine-signed Helper. The explicit local installer can create a certificate-signed stable identity on one development machine; public distribution still requires a Developer ID Application build, Hardened Runtime, timestamp, notarization, stapling, and acceptance from the real tarball.
-- Local gates verify policy, identity, packaging, and the native protocol. CI/release automation is not part of this local candidate. Real long-running workflows across multiple displays, Spaces/Stage Manager, focus contention, Chinese IME, and a TCC-granted action path are not yet verified.
+- Local gates cover policy, identity, packaging, and the native protocol. A [CI workflow](./.github/workflows/ci.yml) and [Helper release pipeline](./RELEASE.md) are checked in; their presence is not proof of a successful CI run or a signed, notarized release. Individual action tests do not establish broad coverage of long-running workflows, multiple displays, Spaces/Stage Manager, focus contention, or Chinese IME.
+
+## Documentation
+
+- [中文说明](./README.zh.md) — the same installation, capability, and safety boundaries in Chinese.
+- [Native Helper release guide](./RELEASE.md) — signing, notarization, packaging, and explicit owner setup.
+- [Driver contract](./src/contracts.ts) — versioned types for `dsh-qa` consumers.
+- [CI workflow](./.github/workflows/ci.yml) — configured build and verification matrix, not a release claim.
 
 ## License
 

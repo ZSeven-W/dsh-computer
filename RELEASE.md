@@ -1,5 +1,7 @@
 # DSH Computer Helper Release Pipeline
 
+[English README](./README.md) · [中文说明](./README.zh.md)
+
 This repository contains the complete release pipeline for the native DSH
 Computer Helper. The only intentionally missing ingredient is the owner's
 Developer ID Application certificate and App Store Connect notary credentials.

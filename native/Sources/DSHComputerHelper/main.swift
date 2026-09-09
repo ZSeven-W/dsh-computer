@@ -1310,6 +1310,10 @@ private func visualActionResult(_ request: Request) async -> ActionResult {
         // One final session check immediately before posting.
         try requireInteractiveSession()
 
+        // The helper exits after its single request. Keep it alive for a
+        // bounded drain after posting (including a drag's cleanup mouse-up),
+        // without retrying input or claiming the target handled the event.
+        defer { PostedInputDrain.wait() }
         switch payload.action.op {
         case "click":
             try postMouseClick(at: points[0])

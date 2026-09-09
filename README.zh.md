@@ -13,6 +13,15 @@
   <a href="./README.md">English</a> &middot; <a href="./README.zh.md"><b>简体中文</b></a>
 </p>
 
+<p align="center">
+  <a href="#工具">能力</a> &middot; <a href="#快速开始本地候选版">快速开始</a> &middot; <a href="#安全与结果语义">安全边界</a> &middot; <a href="#开发与验收">开发</a> &middot; <a href="#文档入口">文档</a>
+</p>
+
+<p align="center">
+  <img src="./docs/images/dsh-computer-demo.png" alt="原生 macOS 测试 App：驱动生成的编号目标与重新观察确认的验证结果" width="760" />
+</p>
+<p align="center"><sub>Computer 驱动实际采集的浅色原生测试窗口，编号来自视觉观察。已执行文本输入和 AX 点击；点击回执为 unknown，随后重新观察确认 PASS。没有发布任何内容。</sub></p>
+
 ## 为什么还要做一个 Computer Use？
 
 刚才看见一个按钮，不代表现在还有权点击它。窗口会移动，App 会重启，PID 会复用，动态界面会重排子节点，另一个 Agent 也可能同时在操作。DSH Computer 把每次观察当成一张短期能力票据，而不是一包长期有效的坐标。
@@ -61,7 +70,7 @@ computer_act
 | `computer_observe` | 有界读取一个 macOS App/窗口的 Accessibility 树，返回 opaque ref、指纹和过期时间。 |
 | `computer_visual_observe` | 只截取新鲜 observation 绑定的明确编号窗口，做像素校验，把有界 AX Set-of-Mark 编号烙入图片，再通过 DSH 附件交给当前这一路支持图片的模型。 |
 | `computer_visual_act` | 对同一份截图的附件图像像素执行 `click`、`drag` 或 `scroll`；必须先经宿主批准，工具只用受信任的附件几何信息把附件像素换算成原生像素，不接受模型提供的缩放或原生坐标。 |
-| `computer_act` | 对一个新鲜 ref 执行安全的 `click`、`focus`、`type` 或 `key`；每次动作前都重新核验身份。 |
+| `computer_act` | 对一个新鲜 ref 执行安全的 `click`、`focus`、`type`、`key` 或 `scroll`；每次动作前都重新核验身份。`scroll` 调整所属 AX 滚动区域，在重新观察证明内容移动前返回 `unknown`。 |
 | `computer_evidence` | 返回交互会话、Accessibility 与录屏就绪状态，Helper executable/bundle/signing/process/caller/resolution 身份，以及当前 Agent 自己的近期 AX/视觉动作回执。 |
 
 模型参数里没有 Agent id、AX path、PID lease，也没有让模型自己决定的 `sensitive` 开关。实时 Agent 身份由宿主提供；原始 AX 定位路径不会离开 Driver。
@@ -79,6 +88,7 @@ computer_act
 - 动作前精确比较 bundle id、PID、启动身份、窗口身份、role/subrole、name、identifier、frame 和安全角色。
 - 实时 AX name/identifier 语义命中删除、资金、发送、发布或分享的点击，`Return`/`Enter` 提交键，以及明确导航白名单之外的按键组合，都需要宿主向所属用户展示上下文并取得一次性的 `allowed-once`。安全 focus/导航不弹审批；模型无法传入或伪造审批参数。
 - 审批绑定实时 Agent/tool call、observation fingerprint、action digest、风险类别、opaque ref digest 和单请求 nonce。Driver 在询问前、批准后各重新观察一次；目标变化、过期或 scope 被销毁时，该次批准会被消费，但绝不下发动作。
+- 每个视觉坐标动作都按 AX-opaque 未知目标处理，一律要求宿主一次性的 `allowed-once`；询问前和派发前重新核验并截图同一窗口。坐标点或拖拽终点下发现密码等安全字段时直接拒绝。
 - 密码框输入仍然永久拒绝，不能通过审批放行。
 - 输入成功送达不等于用户可见结果成功。无法证明界面效果时返回 `unknown`。
 - 点击只有在同一个重新核验通过的目标出现动作特定 value 变化时才会 `confirmed`；目标消失、替换、移动或只是获得焦点都仍是 `unknown`。
@@ -111,9 +121,17 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 
 观察保留还按 Agent 作用域做字节预算（32 MiB 序列化负载）：新观察会超出预算时，先淘汰最旧的 TTL 有效观察——同样以 `OBSERVATION_EVICTED` 报告——且最新一次观察永不被淘汰。
 
-## 本地安装
+## 快速开始（本地候选版）
 
-这个候选版本刻意只做本地工程：尚未发布，也不会安装任何 App 到 `/Applications`。
+源码包声明版本为 `0.1.0-rc.1`；本指南使用本地候选版，不代表已经核实 npm 发布状态。下列步骤不会把任何 App 安装到 `/Applications`。
+
+环境要求：macOS、Node.js `>=24.11.0`、pnpm `10.34.5`，以及编译原生 Helper 所需的 Swift 工具链。DSH 单独安装：
+
+```sh
+npm install -g @deepseek-ai/dsh@latest
+```
+
+在本仓库目录执行以下命令，并将绝对路径替换为实际 checkout：
 
 ```sh
 pnpm install
@@ -151,13 +169,20 @@ pnpm run smoke:pack
 
 - 只支持 macOS。包在其他系统仍可安装，使 DSH profile 能明确报告“不支持”，而不是启动即崩；原生动作不可用。
 - 当前桌面必须已解锁且交互可用。读路径前后以及 mutation 前都会复查锁屏变化；登录窗口持有会话时，后台自动化会被拒绝。
-- 原生窗口截图是独立的多模态观察路径，不是坐标动作路径；首版仍没有 OCR、坐标点击、滚动、拖拽、剪贴板自动化和完整 IME 模拟。
+- AX ref 是主要动作路径；对于 AX-opaque 控件，`computer_visual_act` 提供绑定截图、必须经宿主批准的坐标 `click`、`drag` 和 `scroll`，派发结果保持 `unknown`，由消费者继续验证效果。AX `scroll` 调整所属滚动区域的垂直滚动条。当前没有内置 OCR、剪贴板自动化或完整 IME 模拟。
 - 视觉观察要求 AX 暴露明确窗口号/frame、实际 Helper 身份拥有录屏权限、DSH 附件服务已挂载，且当前精确模型 route 明确声明支持图片。近黑/透明截图会被像素校验拒绝；近白/近纯色截图会保留并携带 warning classification。
 - `type` 通过可写 Accessibility value 完成，不等同于自然键盘或输入法输入。
 - 部分 App 不完整暴露 AX name、identifier、frame、窗口号或 action；缺少强启动身份时，动作会 fail-closed。
 - 确定性风险分类只能使用 App 实际暴露的 AX 语义。没有标签的自定义控件无法仅凭 AX 证明其是否有破坏性；应结合视觉观察理解上下文，并把它视为当前安全边界，而不是保证。
 - npm 候选版不预置编译或本机签名的 Helper。显式本地脚本可以在一台开发机上建立证书签名的稳定身份；公开分发仍需要 Developer ID Application、Hardened Runtime、时间戳、公证、staple，并从真实 tarball 重新验收。
-- 本地门禁已验证策略、身份、打包和原生协议；当前本地候选版尚未配置 CI/发布自动化。多屏、Spaces/Stage Manager、焦点争抢、中文 IME、长时间运行，以及真正授予 TCC 后的动作链仍未验证。
+- 本地门禁覆盖策略、身份、打包和原生协议。仓库已包含 [CI 工作流](./.github/workflows/ci.yml)与 [Helper 发布流水线](./RELEASE.md)，但配置存在不等于 CI 运行通过或已完成签名、公证发布。个别动作测试也不代表已经全面覆盖多屏、Spaces/Stage Manager、焦点争抢、中文 IME 或长时间运行。
+
+## 文档入口
+
+- [English README](./README.md)：英文安装、能力和安全边界说明。
+- [原生 Helper 发布指南](./RELEASE.md)：签名、公证、打包与需要所有者明确配置的步骤。
+- [Driver 契约](./src/contracts.ts)：供 `dsh-qa` 消费的版本化类型。
+- [CI 工作流](./.github/workflows/ci.yml)：已配置的构建与验证矩阵，不代表发布状态。
 
 ## 许可证
 
