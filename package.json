@@ -49,6 +49,7 @@
     "RELEASE.md",
     "cordis.patch.yml",
     "README.md",
+    "docs/images",
     "README.*.md",
     "LICENSE"
   ],
