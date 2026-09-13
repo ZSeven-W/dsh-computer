@@ -28,6 +28,10 @@ import type {
   NativeTransport,
   NativeVisualActResult,
 } from './native-protocol.js'
+import { pluginEnv } from './plugin-env.js'
+
+/** Suffix of the explicit helper-binary override (see plugin-env.ts). */
+export const HELPER_BINARY_ENV_SUFFIX = 'COMPUTER_HELPER'
 
 const MAX_HELPER_OUTPUT_BYTES = 4 * 1024 * 1024
 const HELPER_TIMEOUT_MS = 20_000
@@ -74,7 +78,7 @@ interface RunResult {
 
 export interface NativeHelperOptions {
   packageRoot?: string
-  /** Explicit, intentionally unstable test/deployment override. Equivalent to DSH_COMPUTER_HELPER. */
+  /** Explicit, intentionally unstable test/deployment override. Equivalent to DSHPLUGIN_COMPUTER_HELPER. */
   binaryPath?: string
   /** Primarily for isolated resolver tests; production defaults to the documented fixed app path. */
   stableBinaryPath?: string
@@ -513,7 +517,7 @@ export class NativeHelper implements NativeTransport {
     const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
     this.#packageRoot = resolve(options.packageRoot ?? defaultRoot)
     this.#nativeDir = join(this.#packageRoot, 'native')
-    this.#explicitBinary = options.binaryPath ?? process.env.DSH_COMPUTER_HELPER
+    this.#explicitBinary = options.binaryPath ?? pluginEnv(HELPER_BINARY_ENV_SUFFIX)
     this.#stableBinary = resolve(options.stableBinaryPath ?? defaultStableBinaryPath())
     this.#cacheRoot = options.cacheRoot ?? join(homedir(), 'Library', 'Caches', 'dsh-computer', 'helper')
     this.#platform = options.platform ?? process.platform

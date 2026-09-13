@@ -140,7 +140,7 @@ dsh plugin --profile web add link:/absolute/path/to/dsh-computer
 dsh web
 ```
 
-Swift Helper 源码随插件打包。运行时解析顺序固定为：显式 `DSH_COMPUTER_HELPER` override、下方固定本地 App、最后才是 staging 到内容寻址缓存并用固定开发 code identifier 重新 ad-hoc 签名的开发构建；SwiftPM 工作树产物绝不会被原地执行。显式 override 与开发构建都会如实报告 `identityStable: false`。
+Swift Helper 源码随插件打包。运行时解析顺序固定为：显式 `DSHPLUGIN_COMPUTER_HELPER` override、下方固定本地 App、最后才是 staging 到内容寻址缓存并用固定开发 code identifier 重新 ad-hoc 签名的开发构建；SwiftPM 工作树产物绝不会被原地执行。显式 override 与开发构建都会如实报告 `identityStable: false`。
 
 如需稳定的本机 TCC 身份，签名证书必须由你明确选择，并显式运行安装脚本：
 

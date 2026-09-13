@@ -96,8 +96,30 @@ test('status rejects malformed nested values, unsafe integers, enums, booleans, 
   }
 })
 
-test('DSH_COMPUTER_HELPER is an explicit unstable override ahead of the fixed app and development build', async () => {
+test('DSHPLUGIN_COMPUTER_HELPER is an explicit unstable override ahead of the fixed app and development build', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-computer-resolver-explicit-'))
+  const explicit = join(root, 'explicit-helper')
+  const stable = join(root, 'DSH Computer Helper.app', 'Contents', 'MacOS', 'dsh-computer-helper')
+  const worktree = join(root, 'native', '.build', 'release', 'dsh-computer-helper')
+  const prior = process.env.DSHPLUGIN_COMPUTER_HELPER
+  try {
+    await Promise.all([fakeHelper(explicit), fakeHelper(stable), fakeHelper(worktree)])
+    process.env.DSHPLUGIN_COMPUTER_HELPER = explicit
+    const helper = new NativeHelper({ packageRoot: root, stableBinaryPath: stable, platform: 'darwin' })
+    const status = await helper.request({ id: 'status', command: 'status' }, { scopeId: 'resolver' })
+    assert.equal(status.resolution.source, 'explicit-override')
+    assert.equal(status.resolution.selectedPath, explicit)
+    assert.equal(status.identityStable, false)
+    assert.equal(status.helperExecutable, explicit)
+    await helper.dispose()
+  } finally {
+    if (prior === undefined) delete process.env.DSHPLUGIN_COMPUTER_HELPER
+    else process.env.DSHPLUGIN_COMPUTER_HELPER = prior
+    await rm(root, { recursive: true, force: true })
+  }
+})
+test('the legacy DSH_COMPUTER_HELPER name still resolves, so existing shell exports keep working', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-computer-resolver-legacy-'))
   const explicit = join(root, 'explicit-helper')
   const stable = join(root, 'DSH Computer Helper.app', 'Contents', 'MacOS', 'dsh-computer-helper')
   const worktree = join(root, 'native', '.build', 'release', 'dsh-computer-helper')

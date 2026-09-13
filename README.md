@@ -141,7 +141,7 @@ dsh plugin --profile web add link:/absolute/path/to/dsh-computer
 dsh web
 ```
 
-The Swift helper source ships with the plugin. Runtime resolution is deliberately ordered as: an explicit `DSH_COMPUTER_HELPER` override, the fixed local app below, then development builds staged into a content-addressed cache and ad-hoc re-signed with a fixed development code identifier. SwiftPM worktree artifacts are never executed in place. Explicit overrides and development builds are reported as `identityStable: false`.
+The Swift helper source ships with the plugin. Runtime resolution is deliberately ordered as: an explicit `DSHPLUGIN_COMPUTER_HELPER` override, the fixed local app below, then development builds staged into a content-addressed cache and ad-hoc re-signed with a fixed development code identifier. SwiftPM worktree artifacts are never executed in place. Explicit overrides and development builds are reported as `identityStable: false`.
 
 For a stable local TCC identity, choose the signing identity yourself and run the installer explicitly:
 
