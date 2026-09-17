@@ -5,15 +5,21 @@ on:
   push:
     branches: [main]
 
+# native/Package.swift declares swift-tools-version 6.0. The macos-14 image
+# ships Swift 5.10, so `swift build` there dies with "package is using Swift
+# tools version 6.0.0 but the installed version is 5.10.0" before any test
+# runs — which is why this workflow has been red on macOS. macos-15 ships
+# Swift 6. Bumping the image is the fix; lowering the tools version would
+# give up the 6.0 language mode the helper is written against.
 jobs:
   verify:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             node: '24.11.0'
-          - os: macos-14
+          - os: macos-15
             node: '26'
           - os: ubuntu-latest
             node: '24.11.0'

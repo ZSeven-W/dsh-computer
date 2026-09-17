@@ -122,7 +122,23 @@ requireOwn(status.result.caller, ['pid', 'executable', 'bundleIdentifier', 'name
 const observe = await request({
   id: 'observe-smoke', command: 'observe', app: null, window: null, maxDepth: 1, maxNodes: 4,
 })
-if (!observe.ok && !['accessibility_permission_required', 'session_locked'].includes(observe.error?.code)) {
+// This smoke validates the PROTOCOL SHAPE, not that some application happens
+// to have a window. `app: null` observes whatever is frontmost, and on a real
+// machine that can legitimately be something the AX API exposes no windows for
+// — a GPU-rendered terminal (Warp), a fullscreen app, the login window — and
+// on a CI runner there is usually no windowed app at all. Those states must be
+// tolerated the same way a missing grant or a locked session is, or the gate
+// fails for a reason that says nothing about the helper. What is NOT relaxed:
+// every field assertion below still runs whenever the observe DID succeed.
+const OBSERVE_ENVIRONMENT_CODES = [
+  'accessibility_permission_required',
+  'session_locked',
+  'window_not_found',
+]
+// A tolerated code is never silent: the summary at the end of this script
+// prints `boundedObserve: { ok: false, code }`, so a green run always says
+// whether the observe actually ran.
+if (!observe.ok && !OBSERVE_ENVIRONMENT_CODES.includes(observe.error?.code)) {
   throw new Error(`unexpected bounded observation response: ${JSON.stringify(observe)}`)
 }
 if (observe.ok) {
