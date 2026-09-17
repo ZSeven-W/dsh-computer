@@ -124,7 +124,7 @@ Observation retention is also byte-budgeted per Agent scope (32 MiB of serialize
 
 ## Quick start (local candidate)
 
-The source package declares `0.1.0-rc.1`; this guide uses a local candidate, not a verified npm release. No step below installs an app into `/Applications`.
+The package is published as `0.1.0-rc.1`, but the Helper is not: it is built and granted locally by you, and is not Developer ID signed or notarized. No step below installs an app into `/Applications`.
 
 Requirements: macOS, Node.js `>=24.11.0`, pnpm `10.34.5`, and a Swift toolchain for the native Helper. Install DSH separately:
 

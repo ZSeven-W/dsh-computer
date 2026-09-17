@@ -123,7 +123,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 
 ## 快速开始（本地候选版）
 
-源码包声明版本为 `0.1.0-rc.1`；本指南使用本地候选版，不代表已经核实 npm 发布状态。下列步骤不会把任何 App 安装到 `/Applications`。
+npm 包版本为 `0.1.0-rc.1`，但 Helper 不随包分发：它由你在本机构建并授权，没有 Developer ID 签名，也没有公证。下列步骤不会把任何 App 安装到 `/Applications`。
 
 环境要求：macOS、Node.js `>=24.11.0`、pnpm `10.34.5`，以及编译原生 Helper 所需的 Swift 工具链。DSH 单独安装：
 

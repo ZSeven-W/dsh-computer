@@ -94,5 +94,9 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
-  }
+  },
+  "bugs": {
+    "url": "https://github.com/ZSeven-W/dsh-computer/issues"
+  },
+  "homepage": "https://github.com/ZSeven-W/dsh-computer#readme"
 }
