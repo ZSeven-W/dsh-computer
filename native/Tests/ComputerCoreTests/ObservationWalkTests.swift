@@ -9,10 +9,30 @@ final class ObservationWalkTests: XCTestCase {
         AXUIElementCreateApplication(pid_t(1_000 + id))
     }
 
+    /// Builds a CFArray that RETAINS its elements.
+    ///
+    /// This passed `nil` for the callbacks, which means the array does not
+    /// retain anything, and combined with `passUnretained` nothing kept the
+    /// elements alive. AXUIElement arguments survived by accident — the tests
+    /// hold them in locals — but a bridged temporary such as
+    /// `"not-an-ax-element" as CFTypeRef` was deallocated the moment this
+    /// function returned, leaving a dangling pointer that
+    /// `ChildrenRead.from` then called `CFGetTypeID` on.
+    ///
+    /// That is a use-after-free, and it read as an environment quirk for three
+    /// rounds: freed memory usually still looks like a valid object locally,
+    /// while GitHub's macOS runner clobbered it and the test binary died with
+    /// `error: Exited with unexpected signal code 5` — after every test that
+    /// had run so far had passed.
+    ///
+    /// `kCFTypeArrayCallBacks` makes the array retain each element, which is
+    /// what the tests assumed all along.
     private func cfArray(_ elements: [CFTypeRef]) -> CFArray {
         var pointers: [UnsafeRawPointer?] = elements.map { UnsafeRawPointer(Unmanaged.passUnretained($0).toOpaque()) }
         return pointers.withUnsafeMutableBufferPointer { buffer in
-            CFArrayCreate(kCFAllocatorDefault, buffer.baseAddress, elements.count, nil)!
+            withUnsafePointer(to: kCFTypeArrayCallBacks) { callbacks in
+                CFArrayCreate(kCFAllocatorDefault, buffer.baseAddress, elements.count, callbacks)!
+            }
         }
     }
 
