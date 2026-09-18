@@ -3,6 +3,7 @@ import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFi
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import test from 'node:test'
+import { HELPER_VERSION } from './fixtures.mjs'
 import { NativeHelper } from '../lib/index.js'
 
 async function waitFor(path, timeoutMs = 3_000) {
@@ -24,6 +25,11 @@ async function fixture() {
   const fakeSwift = join(bin, 'swift')
   await copyFile(join(import.meta.dirname, 'fixtures', 'fake-swift.cjs'), fakeSwift)
   await chmod(fakeSwift, 0o755)
+  // The stub is copied out of the repo, so it cannot resolve package.json by a
+  // relative path. Set the version once here instead of at each call site: the
+  // stub stands in for the real Helper and must answer with the SAME protocol
+  // version, or every handshake fails on a mismatch.
+  process.env.DSH_COMPUTER_FAKE_HELPER_VERSION = HELPER_VERSION
   return { root, bin, marker: join(root, 'swift.marker') }
 }
 
@@ -37,7 +43,7 @@ process.stdin.on('end', () => {
   const result = {
     platform: 'macos', accessibilityTrusted: false, screenRecordingTrusted: false,
     sessionLocked: false, interactiveSessionAvailable: true,
-    helperVersion: '0.1.0-rc.1', helperExecutable: process.argv[1],
+    helperVersion: '${HELPER_VERSION}', helperExecutable: process.argv[1],
     bundle: { path: null, identifier: null, version: null },
     signing: { signed: false, kind: 'unsigned', codeIdentifier: null, teamIdentifier: null, authorities: [], cdhash: null, statusCode: 0, detail: 'fixture' },
     process: { pid: process.pid, ppid: process.ppid },
@@ -80,7 +86,12 @@ test('status rejects a missing required field instead of leaking undefined', asy
 })
 
 test('status rejects a Helper protocol version mismatch', async () => {
-  await rejectsInvalidStatus("result.helperVersion = '0.1.0-rc.0'", /helperVersion must equal 0\.1\.0-rc\.1/u)
+  // Built from HELPER_VERSION so a release bump does not silently turn this
+  // guard into a test of the PREVIOUS version's error message.
+  await rejectsInvalidStatus(
+    "result.helperVersion = '0.0.0-not-the-version'",
+    new RegExp('helperVersion must equal ' + HELPER_VERSION.replace(/[.]/gu, '\\.'), 'u'),
+  )
 })
 
 test('status rejects malformed nested values, unsafe integers, enums, booleans, and resolution', async (t) => {
@@ -390,7 +401,7 @@ test('late Agents wait out final-waiter cancellation and share exactly one fresh
     const pendingC = helper.request({ id: 'c', command: 'status' }, { scopeId: 'agent-c' })
     await rejectedA
     const [statusB, statusC] = await Promise.all([pendingB, pendingC])
-    assert.equal(statusB.helperVersion, '0.1.0-rc.1')
+    assert.equal(statusB.helperVersion, HELPER_VERSION)
     assert.equal(statusB.resolution.source, 'cache-build')
     assert.equal(statusB.identityStable, false)
     assert.equal(statusC.resolution.selectedPath, statusB.resolution.selectedPath)
@@ -434,7 +445,7 @@ test('a late Agent also escapes a closing build caused by final scope disposal',
     await disposingA
     await rejectedA
     const statusB = await pendingB
-    assert.equal(statusB.helperVersion, '0.1.0-rc.1')
+    assert.equal(statusB.helperVersion, HELPER_VERSION)
     assert.equal(statusB.resolution.source, 'cache-build')
     assert.equal(statusB.identityStable, false)
     await waitFor(`${files.marker}.second-started`)

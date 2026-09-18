@@ -1,3 +1,14 @@
+import { readFileSync } from 'node:fs'
+
+// The Helper protocol version is part of the stdin/stdout handshake, so it must
+// track package.json exactly — build.mjs refuses to build on drift. Hardcoding
+// it here meant every release bumped the package and then broke these tests
+// until someone remembered to edit them too; deriving it makes the next bump a
+// one-line change.
+export const HELPER_VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version
+
 export const app = {
   bundleId: 'dev.zseven.fixture',
   pid: 4242,
@@ -55,7 +66,7 @@ export function nativeStatus(overrides = {}) {
     bundle: {
       path: '/Applications/DSH Computer Helper.app',
       identifier: 'io.github.zseven-w.dsh-computer.helper',
-      version: '0.1.0-rc.1',
+      version: HELPER_VERSION,
     },
     signing: {
       signed: true,

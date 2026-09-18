@@ -1,4 +1,15 @@
 #!/usr/bin/env node
+// The Helper protocol version must track package.json — the build refuses to
+// proceed on drift, and this stub stands in for the real Helper, so a stale
+// literal here fails the handshake with a message about the PREVIOUS release.
+//
+// This file is COPIED into a temp directory before it runs, so it cannot
+// resolve package.json by a relative path. The copier passes the version in.
+const HELPER_VERSION = process.env.DSH_COMPUTER_FAKE_HELPER_VERSION
+if (!HELPER_VERSION) {
+  throw new Error('DSH_COMPUTER_FAKE_HELPER_VERSION must be set by whoever installs this stub')
+}
+
 const { chmod, mkdir, readFile, writeFile } = require('node:fs/promises')
 const { join } = require('node:path')
 
@@ -33,7 +44,7 @@ process.stdin.on('end', () => {
   const result = {
     platform: 'macos', accessibilityTrusted: false, screenRecordingTrusted: false,
     sessionLocked: false, interactiveSessionAvailable: true,
-    helperVersion: '0.1.0-rc.1', helperExecutable: process.argv[1],
+    helperVersion: '${HELPER_VERSION}', helperExecutable: process.argv[1],
     bundle: { path: null, identifier: null, version: null },
     signing: { signed: false, kind: 'unsigned', codeIdentifier: null, teamIdentifier: null, authorities: [], cdhash: null, statusCode: 0, detail: 'fake build' },
     process: { pid: process.pid, ppid: process.ppid },

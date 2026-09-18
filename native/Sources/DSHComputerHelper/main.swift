@@ -6,7 +6,7 @@ import Darwin
 import Foundation
 import Security
 
-private let helperVersion = "0.1.0-rc.1"
+private let helperVersion = "0.1.0-rc.2"
 private let helperBundleId = "io.github.zseven-w.dsh-computer.helper"
 private let maxAttributeText = 240
 private let maxChildrenPerNode = 80
