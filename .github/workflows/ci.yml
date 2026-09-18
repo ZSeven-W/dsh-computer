@@ -1,3 +1,19 @@
+# This is a macOS-only driver. README says so, and `NativeHelper` throws
+# ComputerPlatformError on anything but darwin; the Swift build, the native
+# protocol smoke, and the approval integration all no-op elsewhere.
+#
+# The matrix used to include windows-latest, where five tests failed on
+# `unsafe_capture_artifact`: the capture path asserts an artifact is not
+# readable outside its owner, which is a POSIX mode check that Windows cannot
+# satisfy (chmod there only toggles the read-only bit). Those tests were
+# exercising macOS-only code on a platform that can never run it, so the fix is
+# to stop claiming that platform rather than to weaken a security check.
+#
+# What is left follows dsh-ios/dsh-android: Linux is the cheap gate that proves
+# the TypeScript builds and typechecks anywhere, and macOS runs the real suite.
+# Even a green macOS job is NOT an acceptance of the helper: the native
+# protocol smoke tolerates a runner with no AX-window-exposing frontmost app,
+# and Accessibility / Screen Recording grants only exist on a human's machine.
 name: ci
 
 on:
@@ -5,29 +21,47 @@ on:
   push:
     branches: [main]
 
-# native/Package.swift declares swift-tools-version 6.0. The macos-14 image
-# ships Swift 5.10, so `swift build` there dies with "package is using Swift
-# tools version 6.0.0 but the installed version is 5.10.0" before any test
-# runs — which is why this workflow has been red on macOS. macos-15 ships
-# Swift 6. Bumping the image is the fix; lowering the tools version would
-# give up the 6.0 language mode the helper is written against.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  verify:
+  linux:
+    name: Node ${{ matrix.node }} / build + typecheck (Linux)
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            node: '24.11.0'
-          - os: macos-15
-            node: '26'
-          - os: ubuntu-latest
-            node: '24.11.0'
-          - os: windows-latest
-            node: '24.11.0'
-    runs-on: ${{ matrix.os }}
+        node: ['24.11.0', '26']
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm build
+      - name: Import the built plugin entry
+        run: node --input-type=module -e "await import('./lib/index.js')"
+
+  macos:
+    name: Node ${{ matrix.node }} / full suite (macOS)
+    runs-on: macos-15   # Package.swift needs Swift 6; macos-14 ships 5.10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.11.0', '26']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -40,4 +74,5 @@ jobs:
       - name: Import the built plugin entry
         run: node --input-type=module -e "await import('./lib/index.js')"
       - name: Smoke the packed install
+        if: matrix.node == '24.11.0'
         run: pnpm run smoke:pack

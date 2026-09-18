@@ -29,6 +29,15 @@ const child = spawn('swift', [
   '--security-path', swiftpmSecurity,
   '--manifest-cache', 'local',
   '--disable-sandbox',
+  // This package's suite is XCTest only (7 files import XCTest, none import
+  // Testing). Under Swift 6 `swift test` runs BOTH harnesses, and the empty
+  // swift-testing runner is what aborts on GitHub's macOS images:
+  //   Test run with 0 tests in 0 suites passed
+  //   error: Exited with unexpected signal code 5
+  // while every XCTest suite had already passed. Running only the harness that
+  // owns the tests removes the crash without skipping a single test; drop this
+  // flag the moment a swift-testing test is added.
+  '--disable-swift-testing',
 ], {
   stdio: 'inherit',
   shell: false,
