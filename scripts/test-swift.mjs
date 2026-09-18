@@ -30,13 +30,16 @@ const child = spawn('swift', [
   '--manifest-cache', 'local',
   '--disable-sandbox',
   // This package's suite is XCTest only (7 files import XCTest, none import
-  // Testing). Under Swift 6 `swift test` runs BOTH harnesses, and the empty
-  // swift-testing runner is what aborts on GitHub's macOS images:
-  //   Test run with 0 tests in 0 suites passed
-  //   error: Exited with unexpected signal code 5
-  // while every XCTest suite had already passed. Running only the harness that
-  // owns the tests removes the crash without skipping a single test; drop this
-  // flag the moment a swift-testing test is added.
+  // Testing), so running the second harness Swift 6 starts by default buys
+  // nothing. Keep it off to save a runner process.
+  //
+  // NOTE: this flag was first added on the theory that the empty swift-testing
+  // runner caused `error: Exited with unexpected signal code 5` on GitHub's
+  // macOS images. That theory is WRONG — the crash reproduces with the flag in
+  // place. What is actually known: ComputerCoreTests (23 tests) passes, then
+  // the XCTest binary dies entering ObservationWalkTests, ~0.6s after `Build
+  // complete`, only on hosted runners; all 67 pass locally on a machine with a
+  // real GUI session. Do not treat this flag as the fix for that.
   '--disable-swift-testing',
 ], {
   stdio: 'inherit',
