@@ -51,4 +51,35 @@ const child = spawn('swift', [
   },
 })
 child.on('error', error => { throw error })
-child.on('close', code => { process.exitCode = code ?? 1 })
+child.on('close', async code => {
+  process.exitCode = code ?? 1
+  if (code === 0) return
+  // A Swift test binary that dies on a signal (SIGTRAP shows up as "Exited with
+  // unexpected signal code 5") prints no reason at all through SwiftPM. The
+  // macOS crash report has the thread backtrace and the termination reason, and
+  // on a CI runner it is the only way to learn what happened — nobody can
+  // attach a debugger there. Surface it instead of leaving the next reader with
+  // a bare signal number.
+  const { readdir, readFile, stat } = await import('node:fs/promises')
+  const { homedir } = await import('node:os')
+  const dirs = [
+    join(homedir(), 'Library', 'Logs', 'DiagnosticReports'),
+    '/Library/Logs/DiagnosticReports',
+  ]
+  const since = Date.now() - 10 * 60 * 1000
+  for (const dir of dirs) {
+    let names = []
+    try { names = await readdir(dir) } catch { continue }
+    for (const name of names) {
+      if (!/DSHComputerHelper|xctest|swift-testing/i.test(name)) continue
+      const path = join(dir, name)
+      try {
+        const info = await stat(path)
+        if (info.mtimeMs < since) continue
+        const text = await readFile(path, 'utf8')
+        console.error('\n===== crash report: ' + path + ' =====')
+        console.error(text.split('\n').slice(0, 80).join('\n'))
+      } catch { /* unreadable report is not worth failing over */ }
+    }
+  }
+})
