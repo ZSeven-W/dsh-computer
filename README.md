@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <sub>Package: <code>@zseven-w/dsh-computer</code> &middot; Local candidate: <code>0.1.0-rc.1</code> &middot; Runtime: macOS + Node.js <code>&gt;=24.11.0</code></sub>
+  <sub>Package: <code>@zseven-w/dsh-computer</code> &middot; Local candidate: <code>0.1.0-rc.2</code> &middot; Runtime: macOS + Node.js <code>&gt;=24.11.0</code></sub>
 </p>
 
 <p align="center">
@@ -124,7 +124,7 @@ Observation retention is also byte-budgeted per Agent scope (32 MiB of serialize
 
 ## Quick start (local candidate)
 
-The package is published as `0.1.0-rc.1`, but the Helper is not: it is built and granted locally by you, and is not Developer ID signed or notarized. No step below installs an app into `/Applications`.
+The Helper is not distributed with the package: you build it and grant it locally, and it is deliberately not Developer ID signed or notarized. No step below installs an app into `/Applications`.
 
 Requirements: macOS, Node.js `>=24.11.0`, pnpm `10.34.5`, and a Swift toolchain for the native Helper. Install DSH separately:
 
@@ -175,7 +175,7 @@ Acceptance includes Node unit tests, Swift pure-policy/identity tests, a real Sw
 - `type` uses a settable Accessibility value; it is not a general replacement for natural keyboard/IME input.
 - Some applications expose incomplete AX names, identifiers, frames, window numbers, or actions. Missing strong launch identity makes action preflight fail closed.
 - Deterministic risk classification can only use the AX semantics an app exposes. An unlabeled custom control cannot be proven destructive from AX alone; use visual observation for context and treat this as a current safety limit, not a guarantee.
-- The npm candidate does not ship a prebuilt or machine-signed Helper. The explicit local installer can create a certificate-signed stable identity on one development machine; public distribution still requires a Developer ID Application build, Hardened Runtime, timestamp, notarization, stapling, and acceptance from the real tarball.
+- The npm package does not ship a prebuilt or machine-signed Helper, and it is not going to. **Developer ID notarization is not planned**: every user builds the Helper from this checkout and grants it themselves. The explicit local installer can still create a certificate-signed stable identity on one machine if you have a certificate. Treat "build it yourself" as the supported path, not as a gap waiting to be closed.
 - Local gates cover policy, identity, packaging, and the native protocol. A [CI workflow](./.github/workflows/ci.yml) and [Helper release pipeline](./RELEASE.md) are checked in; their presence is not proof of a successful CI run or a signed, notarized release. Individual action tests do not establish broad coverage of long-running workflows, multiple displays, Spaces/Stage Manager, focus contention, or Chinese IME.
 
 ## Documentation

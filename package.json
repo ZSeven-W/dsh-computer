@@ -1,6 +1,6 @@
 {
   "name": "@zseven-w/dsh-computer",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "description": "A headless-first macOS Computer Use driver for DeepSeek Harness with AX-first observations, window-bound multimodal evidence, host-owned approval, and evidence-backed action receipts",
   "license": "MIT",
   "type": "module",

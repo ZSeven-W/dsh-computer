@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <sub>包名：<code>@zseven-w/dsh-computer</code> &middot; 本地候选版本：<code>0.1.0-rc.1</code> &middot; 运行环境：macOS + Node.js <code>&gt;=24.11.0</code></sub>
+  <sub>包名：<code>@zseven-w/dsh-computer</code> &middot; 本地候选版本：<code>0.1.0-rc.2</code> &middot; 运行环境：macOS + Node.js <code>&gt;=24.11.0</code></sub>
 </p>
 
 <p align="center">
@@ -123,7 +123,7 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 
 ## 快速开始（本地候选版）
 
-npm 包版本为 `0.1.0-rc.1`，但 Helper 不随包分发：它由你在本机构建并授权，没有 Developer ID 签名，也没有公证。下列步骤不会把任何 App 安装到 `/Applications`。
+Helper 不随包分发：它由你在本机构建并授权，并且**刻意**不做 Developer ID 签名与公证。下列步骤不会把任何 App 安装到 `/Applications`。
 
 环境要求：macOS、Node.js `>=24.11.0`、pnpm `10.34.5`，以及编译原生 Helper 所需的 Swift 工具链。DSH 单独安装：
 
@@ -174,7 +174,7 @@ pnpm run smoke:pack
 - `type` 通过可写 Accessibility value 完成，不等同于自然键盘或输入法输入。
 - 部分 App 不完整暴露 AX name、identifier、frame、窗口号或 action；缺少强启动身份时，动作会 fail-closed。
 - 确定性风险分类只能使用 App 实际暴露的 AX 语义。没有标签的自定义控件无法仅凭 AX 证明其是否有破坏性；应结合视觉观察理解上下文，并把它视为当前安全边界，而不是保证。
-- npm 候选版不预置编译或本机签名的 Helper。显式本地脚本可以在一台开发机上建立证书签名的稳定身份；公开分发仍需要 Developer ID Application、Hardened Runtime、时间戳、公证、staple，并从真实 tarball 重新验收。
+- npm 包不预置编译或本机签名的 Helper，而且今后也不会。**没有 Developer ID 公证的计划**：每个使用者都从本工作区自行构建 Helper 并自行授权。如果你手上有证书，显式本地脚本仍可在一台机器上建立证书签名的稳定身份。请把「自行构建」当作受支持的路径，而不是一个等待被补上的缺口。
 - 本地门禁覆盖策略、身份、打包和原生协议。仓库已包含 [CI 工作流](./.github/workflows/ci.yml)与 [Helper 发布流水线](./RELEASE.md)，但配置存在不等于 CI 运行通过或已完成签名、公证发布。个别动作测试也不代表已经全面覆盖多屏、Spaces/Stage Manager、焦点争抢、中文 IME 或长时间运行。
 
 ## 文档入口
