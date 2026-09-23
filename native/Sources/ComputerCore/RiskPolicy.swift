@@ -139,7 +139,7 @@ public enum ActionApprovalBinding {
 
 public enum RiskPolicy {
     private static let highRiskPatterns: [(category: String, pattern: String)] = [
-        ("destructive", #"\b(delete|erase|remove|uninstall|destroy|wipe)\b|删除|清除|抹掉|卸载|销毁"#),
+        ("destructive", #"\b(delete|erase|remove|uninstall|destroy|wipe)\b|删除|抹掉|卸载|销毁"#),
         ("financial", #"\b(pay|purchase|buy now|checkout|transfer|wire|send money|place order)\b|付款|支付|购买|下单|转账|汇款"#),
         ("external-commit", #"\b(send|publish|post|submit|share)\b|发送|发布|提交|分享"#),
     ]
@@ -155,12 +155,18 @@ public enum RiskPolicy {
         "shift+home", "shift+end", "shift+pageup", "shift+pagedown",
     ]
 
-    fileprivate static func normalizedKey(_ key: String) -> String {
+    // Mirrors KEY_ALIASES in src/policy.ts; the approval digest depends on it.
+    private static let keyAliases: [String: String] = [
+        "esc": "escape",
+        "arrowleft": "left", "arrowright": "right", "arrowup": "up", "arrowdown": "down",
+    ]
+
+    public static func normalizedKey(_ key: String) -> String {
         let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if key == "\n" || key == "\r" || normalized == "↩" || normalized == "numpadenter" || normalized == "enter" {
             return "return"
         }
-        return normalized
+        return keyAliases[normalized] ?? normalized
     }
 
     public static func classify(action: ActionPayload, target: ElementIdentity) -> ActionRiskDecision {

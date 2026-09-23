@@ -4,6 +4,7 @@ import type {
   ComputerAppSelector,
   ComputerFrame,
   ComputerModifier,
+  ComputerRunningApp,
   ComputerScrollAmount,
   ComputerScrollDirection,
   ComputerWindowIdentity,
@@ -242,6 +243,26 @@ export type NativeRequest =
       command: 'visual-act'
       visual: NativeVisualActInput
     }
+  | {
+      id: string
+      command: 'apps'
+    }
+  | {
+      id: string
+      command: 'launch'
+      launch: { bundleId: string }
+    }
+
+export interface NativeAppsResult {
+  apps: ComputerRunningApp[]
+  truncated: boolean
+  accessibilityTrusted: boolean
+}
+
+export interface NativeLaunchResult {
+  launched: boolean
+  app: ComputerRunningApp
+}
 
 export interface NativeStatusResult {
   platform: 'macos'
@@ -268,7 +289,7 @@ export interface NativeStatusResult {
 export interface NativeResponse {
   id: string
   ok: boolean
-  result?: NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult
+  result?: NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult | NativeAppsResult | NativeLaunchResult
   error?: {
     code: string
     message: string
@@ -276,7 +297,7 @@ export interface NativeResponse {
 }
 
 export interface NativeTransport {
-  request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult>(
+  request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult | NativeAppsResult | NativeLaunchResult>(
     request: NativeRequest,
     options: { scopeId: string; signal?: AbortSignal },
   ): Promise<T>

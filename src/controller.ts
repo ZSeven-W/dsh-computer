@@ -2,6 +2,10 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type {
   ComputerAction,
   ComputerActionReceipt,
+  ComputerAppList,
+  ComputerLaunchRequest,
+  ComputerLaunchResult,
+  ComputerRunningApp,
   ComputerActionStatus,
   ComputerCapturableWindowIdentity,
   ComputerDriver,
@@ -27,6 +31,8 @@ import type {
   NativeActionPayload,
   NativeApprovalGrant,
   NativeActionResult,
+  NativeAppsResult,
+  NativeLaunchResult,
   NativeCaptureTarget,
   NativeElementIdentity,
   NativeObserveResult,
@@ -160,6 +166,41 @@ function integerInRange(value: number | undefined, fallback: number, minimum: nu
   if (value === undefined) return fallback
   if (!Number.isInteger(value)) throw new Error('numeric limits must be integers')
   return Math.max(minimum, Math.min(maximum, value))
+}
+
+// Reverse-DNS only: no path separators, URL schemes, spaces or shell syntax can
+// reach the helper, which resolves the id through LaunchServices alone.
+const BUNDLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/u
+
+function validBundleId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !BUNDLE_ID_PATTERN.test(value) || !value.includes('.')) {
+    throw new Error(`${label}: bundle id must be an exact reverse-DNS identifier such as com.apple.calculator`)
+  }
+  return value
+}
+
+function runningApp(value: unknown, label: string): ComputerRunningApp {
+  const app = value as Partial<ComputerRunningApp> | null
+  if (
+    app === null || typeof app !== 'object'
+    || typeof app.bundleId !== 'string' || !Number.isInteger(app.pid)
+    || typeof app.active !== 'boolean' || !Array.isArray(app.windows)
+    || !app.windows.every(window => window !== null && typeof window === 'object' && Number.isInteger(window.number))
+  ) {
+    throw new NativeHelperError('invalid_helper_response', `${label}: native helper returned a malformed application`)
+  }
+  return {
+    bundleId: app.bundleId,
+    pid: app.pid as number,
+    launchIdentity: typeof app.launchIdentity === 'string' ? app.launchIdentity : null,
+    name: typeof app.name === 'string' ? app.name : null,
+    active: app.active,
+    windows: app.windows.map(window => ({
+      number: window.number,
+      title: typeof window.title === 'string' ? window.title : null,
+      frame: structuredClone(window.frame),
+    })),
+  }
 }
 
 function scopeId(context: ComputerDriverContext): string {
@@ -1941,6 +1982,39 @@ export class ComputerController implements ComputerDriver {
     } finally {
       state.busyObservations.delete(observation.id)
     }
+  }
+
+  async listApps(context: ComputerDriverContext): Promise<ComputerAppList> {
+    this.#assertLive()
+    const result = await this.#native.request<NativeAppsResult>({ id: this.#id(), command: 'apps' }, {
+      scopeId: scopeId(context),
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+    })
+    if (!Array.isArray(result.apps) || typeof result.truncated !== 'boolean' || typeof result.accessibilityTrusted !== 'boolean') {
+      throw new NativeHelperError('invalid_helper_response', 'computer_apps: native helper returned a malformed list')
+    }
+    return {
+      apps: result.apps.map(app => runningApp(app, 'computer_apps')),
+      truncated: result.truncated,
+      accessibilityTrusted: result.accessibilityTrusted,
+    }
+  }
+
+  async launchApp(request: ComputerLaunchRequest, context: ComputerDriverContext): Promise<ComputerLaunchResult> {
+    this.#assertLive()
+    const bundleId = validBundleId(request.bundleId, 'computer_launch')
+    const result = await this.#native.request<NativeLaunchResult>({ id: this.#id(), command: 'launch', launch: { bundleId } }, {
+      scopeId: scopeId(context),
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+    })
+    if (typeof result.launched !== 'boolean') {
+      throw new NativeHelperError('invalid_helper_response', 'computer_launch: native helper returned a malformed result')
+    }
+    const app = runningApp(result.app, 'computer_launch')
+    if (app.bundleId !== bundleId) {
+      throw new NativeHelperError('invalid_helper_response', `computer_launch: helper reported ${app.bundleId}, expected ${bundleId}`)
+    }
+    return { launched: result.launched, app }
   }
 
   async evidence(context: ComputerDriverContext, options: { limit?: number } = {}): Promise<ComputerEvidence> {

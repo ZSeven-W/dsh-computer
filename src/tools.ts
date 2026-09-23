@@ -4,7 +4,9 @@ import type {
   ComputerApprovalOutcome,
   ComputerDriver,
   ComputerDriverContext,
+  ComputerAppList,
   ComputerEvidence,
+  ComputerLaunchResult,
   ComputerObservation,
   ComputerObserveRequest,
   ComputerModifier,
@@ -114,6 +116,34 @@ const windowSchema: JsonSchema = {
     title: nullable({ type: 'string' }), frame: frameSchema, identity: { type: 'string' },
   },
   required: ['number', 'role', 'subrole', 'title', 'frame', 'identity'],
+}
+const runningAppSchema: JsonSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    bundleId: { type: 'string' }, pid: { type: 'integer' }, launchIdentity: nullable({ type: 'string' }),
+    name: nullable({ type: 'string' }), active: { type: 'boolean' },
+    windows: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        properties: { number: { type: 'integer' }, title: nullable({ type: 'string' }), frame: concreteFrameSchema },
+        required: ['number', 'title', 'frame'],
+      },
+    },
+  },
+  required: ['bundleId', 'pid', 'launchIdentity', 'name', 'active', 'windows'],
+}
+const appListSchema: JsonSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    apps: { type: 'array', items: runningAppSchema }, truncated: { type: 'boolean' }, accessibilityTrusted: { type: 'boolean' },
+  },
+  required: ['apps', 'truncated', 'accessibilityTrusted'],
+}
+const launchSchema: JsonSchema = {
+  type: 'object', additionalProperties: false,
+  properties: { launched: { type: 'boolean' }, app: runningAppSchema },
+  required: ['launched', 'app'],
 }
 const targetSchema: JsonSchema = {
   type: 'object', additionalProperties: false,
@@ -592,6 +622,8 @@ function visualActionRequest(
 }
 
 export interface ComputerTools {
+  computerApps: StructuralToolDefinition
+  computerLaunch: StructuralToolDefinition
   computerObserve: StructuralToolDefinition
   computerVisualObserve: StructuralToolDefinition
   computerVisualAct: StructuralToolDefinition
@@ -600,23 +632,67 @@ export interface ComputerTools {
 }
 
 export const COMPUTER_TOOL_NAMES = [
+  'computer_apps', 'computer_launch',
   'computer_observe', 'computer_visual_observe', 'computer_visual_act', 'computer_act', 'computer_evidence',
 ] as const
 
 export function createComputerTools(driver: ComputerDriver, host: ComputerToolHost = {}): ComputerTools {
   /** Trusted attachment metadata for later coordinate conversion, keyed by the native capture SHA-256. */
   const visualCaptures = new Map<string, ToolVisualCaptureMetadata>()
+  const computerApps: StructuralToolDefinition = {
+    name: 'computer_apps',
+    description: 'List running macOS applications that have a Dock presence, with exact bundle id, pid, whether each is frontmost, and '
+      + 'their normal windows (window number, title, frame). Use it to pick computer_observe app_bundle_id / window_number instead of '
+      + 'guessing or shelling out. Read-only; never prompts. Windows are listed only when Accessibility is granted (accessibilityTrusted).',
+    parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
+    output: { schema: appListSchema, render: renderJson },
+    timeoutMs: 30_000,
+    async execute(value, exec): Promise<ComputerAppList> {
+      assertOnlyKeys(record(value ?? {}, 'computer_apps'), [], 'computer_apps')
+      if (driver.listApps === undefined) throw new Error('computer_apps: this driver cannot list applications')
+      return driver.listApps(executionContext(exec))
+    },
+    presentCall: () => ({ card: 'generic', title: 'List macOS applications', kind: 'read' }),
+  }
+
+  const computerLaunch: StructuralToolDefinition = {
+    name: 'computer_launch',
+    description: 'Open an installed macOS application by exact bundle id, or bring it to the front if it is already running, and wait '
+      + 'briefly for its first window. No arguments, documents or URLs are passed, so this cannot run a command or open a file; it needs '
+      + 'no approval. Use it instead of shell `open -a`. Returns the app with its windows; follow with computer_observe. '
+      + 'Common ids: com.apple.calculator, com.apple.Notes, com.apple.TextEdit, com.apple.finder, com.apple.Safari.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        app_bundle_id: { type: 'string', description: 'Exact bundle identifier, e.g. com.apple.calculator. Never a display name or path.' },
+      },
+      required: ['app_bundle_id'],
+    },
+    output: { schema: launchSchema, render: renderJson },
+    timeoutMs: 30_000,
+    async execute(value, exec): Promise<ComputerLaunchResult> {
+      const args = record(value, 'computer_launch')
+      assertOnlyKeys(args, ['app_bundle_id'], 'computer_launch')
+      if (driver.launchApp === undefined) throw new Error('computer_launch: this driver cannot launch applications')
+      const bundleId = args.app_bundle_id
+      if (typeof bundleId !== 'string' || bundleId.trim() === '') throw new Error('computer_launch: app_bundle_id is required')
+      return driver.launchApp({ bundleId }, executionContext(exec))
+    },
+    presentCall: () => ({ card: 'generic', title: 'Open macOS application', kind: 'execute' }),
+  }
+
   const computerObserve: StructuralToolDefinition = {
     name: 'computer_observe',
     description: 'Observe one explicit macOS application/window through Accessibility and return bounded, opaque, expiring refs. '
-      + 'Omit app selectors only when the current frontmost app is intentionally the target. Run this immediately before every action; '
+      + 'Omit app selectors only when the current frontmost app is intentionally the target; get exact ids and window numbers from '
+      + 'computer_apps, and open apps with computer_launch. Run this immediately before every action; '
       + 'refs are Agent-scoped and stale/rebound targets are rejected.',
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
         app_bundle_id: { type: 'string', description: 'Exact bundle identifier. Never use a display name.' },
         app_pid: { type: 'integer', description: 'Exact live PID, optionally paired with bundle identifier.' },
-        window_number: { type: 'integer', description: 'Exact AX window number from an earlier observation.' },
+        window_number: { type: 'integer', description: 'Exact window number from computer_apps or an earlier observation.' },
         window_title: { type: 'string', description: 'Exact window title; duplicate matches are rejected.' },
         max_depth: { type: 'integer', description: 'Traversal depth, clamped to 1...8.' },
         max_nodes: { type: 'integer', description: 'Node budget, clamped to 1...500.' },
@@ -730,6 +806,8 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
       + 'the live application, process launch, window and element before acting, and repeats that preflight after any approval. Secure text is '
       + 'permanently blocked. Destructive/financial/send/publish clicks, commit keys, and non-navigation key chords require host-owned approval '
       + 'for exactly this action/ref/observation; the model cannot provide an approval or risk flag. Safe focus, allowlisted navigation, and scrolling do not prompt. '
+      + 'To enter digits, letters or symbols, click the on-screen button or use action=type on a text field — action=key with a printable '
+      + 'character is a non-navigation chord and prompts the user every time. Key names: escape (or esc), tab, left/right/up/down, home, end, pageup, pagedown. '
       + 'Scroll (action=scroll) scrolls the Accessibility scroll area that contains or is the referenced element, direction up/down with an optional '
       + 'amount of line, page (default), or a positive point count. '
       + 'Inspect the returned receipt status: '
@@ -740,7 +818,7 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
         action: { type: 'string', enum: ['click', 'focus', 'type', 'key', 'scroll'] },
         ref: { type: 'string', description: 'Opaque, expiring ref returned by computer_observe.' },
         text: { type: 'string', description: 'Text for action=type; never use for credentials or secure fields.' },
-        key: { type: 'string', description: 'Key name for action=key. Allowlisted navigation is immediate; commit and non-navigation keys require host approval.' },
+        key: { type: 'string', description: 'Key name for action=key. Navigation (escape, tab, arrows, home/end, pageup/pagedown) is immediate; return and every other key, including single printable characters, require host approval — prefer click or type for those.' },
         modifiers: { type: 'array', items: { type: 'string', enum: ['command', 'control', 'option', 'shift', 'fn'] } },
         direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction for action=scroll.' },
         amount: { description: 'Scroll amount for action=scroll: line, page (default), or a positive point count.', oneOf: [{ type: 'string', enum: ['line', 'page'] }, { type: 'number' }] },
@@ -781,5 +859,5 @@ export function createComputerTools(driver: ComputerDriver, host: ComputerToolHo
     presentCall: () => ({ card: 'generic', title: 'Inspect Computer Use evidence', kind: 'read' }),
   }
 
-  return { computerObserve, computerVisualObserve, computerVisualAct, computerAct, computerEvidence }
+  return { computerApps, computerLaunch, computerObserve, computerVisualObserve, computerVisualAct, computerAct, computerEvidence }
 }

@@ -53,5 +53,6 @@ test('plugin provides driver v5, registers five tools, and unprovides before dri
   assert.deepEqual(events.filter(event => event.startsWith('unregister:')), [
     'unregister:computer_evidence', 'unregister:computer_act',
     'unregister:computer_visual_act', 'unregister:computer_visual_observe', 'unregister:computer_observe',
+    'unregister:computer_launch', 'unregister:computer_apps',
   ])
 })

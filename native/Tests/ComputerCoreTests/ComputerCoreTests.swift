@@ -2,9 +2,9 @@ import XCTest
 @testable import ComputerCore
 
 final class ComputerCoreTests: XCTestCase {
-    private func target(name: String? = "Save", secure: Bool = false) -> ElementIdentity {
+    private func target(name: String? = "Save", identifier: String = "primary", secure: Bool = false) -> ElementIdentity {
         ElementIdentity(
-            role: "AXButton", subrole: nil, name: name, identifier: "primary",
+            role: "AXButton", subrole: nil, name: name, identifier: identifier,
             frame: ComputerFrame(x: 10, y: 20, width: 80, height: 24), enabled: true,
             focused: false, secure: secure, actions: ["AXPress"], value: nil
         )
@@ -174,6 +174,43 @@ final class ComputerCoreTests: XCTestCase {
             ),
             .safe
         )
+    }
+
+    func testEscapeAndArrowAliasesAreNavigationKeys() {
+        for key in ["esc", "Esc", " ESC ", "arrowleft", "ArrowRight", "ARROWUP", "arrowdown"] {
+            XCTAssertEqual(
+                RiskPolicy.classify(action: ActionPayload(kind: "key", key: key), target: target(name: "Editor")),
+                .safe, key
+            )
+        }
+        XCTAssertEqual(RiskPolicy.normalizedKey("Esc"), "escape")
+        XCTAssertEqual(RiskPolicy.normalizedKey("ArrowLeft"), "left")
+        XCTAssertEqual(
+            ActionApprovalBinding.digest(action: ActionPayload(kind: "key", key: "esc")),
+            ActionApprovalBinding.digest(action: ActionPayload(kind: "key", key: "escape"))
+        )
+        XCTAssertNotEqual(
+            RiskPolicy.classify(action: ActionPayload(kind: "key", key: "7"), target: target(name: "Keypad")),
+            .safe
+        )
+    }
+
+    func testClearButtonsAreNotDestructiveInEitherLanguage() {
+        for (name, identifier) in [("清除", "Clear"), ("全部清除", "AllClear"), ("Clear", "Clear")] {
+            XCTAssertEqual(
+                RiskPolicy.classify(action: ActionPayload(kind: "click"), target: target(name: name, identifier: identifier)),
+                .safe, name
+            )
+        }
+        for name in ["删除", "删除备忘录", "抹掉磁盘", "卸载", "销毁"] {
+            XCTAssertEqual(
+                RiskPolicy.classify(action: ActionPayload(kind: "click"), target: target(name: name)),
+                .approvalRequired(
+                    code: .dangerousClick,
+                    reason: "target semantics indicate a destructive operation and require one-action host approval"
+                ), name
+            )
+        }
     }
 
     func testFocusPlainTypingAndOrdinaryClickAreSafe() {

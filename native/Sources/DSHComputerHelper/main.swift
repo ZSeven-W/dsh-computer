@@ -63,6 +63,56 @@ private struct Request: Decodable {
     let approval: HostApprovalGrant?
     let capture: CapturePayload?
     let visual: VisualActPayload?
+    let launch: LaunchPayload?
+}
+
+private struct LaunchPayload: Decodable {
+    let bundleId: String
+}
+
+// Explicit encoders: synthesized Codable omits nil optionals, and the Node
+// side requires every key to be present (null, not missing).
+private struct RunningAppWindow: Codable {
+    let number: Int
+    let title: String?
+    let frame: ComputerFrame
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(number, forKey: .number)
+        try container.encode(title, forKey: .title)
+        try container.encode(frame, forKey: .frame)
+    }
+}
+
+private struct RunningApp: Codable {
+    let bundleId: String
+    let pid: Int32
+    let launchIdentity: String?
+    let name: String?
+    let active: Bool
+    let windows: [RunningAppWindow]
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(bundleId, forKey: .bundleId)
+        try container.encode(pid, forKey: .pid)
+        try container.encode(launchIdentity, forKey: .launchIdentity)
+        try container.encode(name, forKey: .name)
+        try container.encode(active, forKey: .active)
+        try container.encode(windows, forKey: .windows)
+    }
+}
+
+private struct AppsResult: Codable {
+    let apps: [RunningApp]
+    let truncated: Bool
+    let accessibilityTrusted: Bool
+}
+
+private struct LaunchResult: Codable {
+    let launched: Bool
+    let app: RunningApp
 }
 
 private struct ErrorPayload: Codable {
@@ -997,7 +1047,8 @@ private func captureRequest(
         action: nil,
         approval: nil,
         capture: payload,
-        visual: nil
+        visual: nil,
+        launch: nil
     )
 }
 
@@ -1435,7 +1486,7 @@ private struct PreparedKey {
 }
 
 private func prepareKey(key: String, modifiers: [String]) throws -> PreparedKey {
-    let normalized = key.trimmingCharacters(in: .whitespaces).lowercased()
+    let normalized = RiskPolicy.normalizedKey(key)
     guard let keyCode = keyCodes[normalized] else {
         throw HelperFailure(code: "unsupported_key", message: "unsupported key: \(key)")
     }
@@ -1793,6 +1844,107 @@ private func emit<Result: Codable>(_ response: Response<Result>) {
     FileHandle.standardOutput.write(Data((line + "\n").utf8))
 }
 
+private let maxListedApps = 64
+private let maxListedWindowsPerApp = 16
+
+/// The Accessibility windows computer_observe can select, numbered the same
+/// way observe numbers them. Without Accessibility trust nothing is listed:
+/// the window server alone also reports menu-bar strips and other layer-0
+/// windows that observe would reject.
+private func accessibilityWindows(_ running: NSRunningApplication) -> [RunningAppWindow] {
+    guard AXIsProcessTrusted() else { return [] }
+    return windows(AXUIElementCreateApplication(running.processIdentifier)).compactMap { window in
+        let identity = windowIdentity(window)
+        guard let number = identity.number, let frame = identity.frame else { return nil }
+        return RunningAppWindow(number: number, title: identity.title, frame: frame)
+    }
+}
+
+private func runningApp(_ running: NSRunningApplication) throws -> (app: RunningApp, windowsTruncated: Bool) {
+    let identity = try appIdentity(running)
+    let candidates = accessibilityWindows(running)
+    return (
+        RunningApp(
+            bundleId: identity.bundleId, pid: identity.pid, launchIdentity: identity.launchIdentity,
+            name: identity.name, active: running.isActive,
+            windows: Array(candidates.prefix(maxListedWindowsPerApp))
+        ),
+        candidates.count > maxListedWindowsPerApp
+    )
+}
+
+/// Dock-visible applications only: agents, daemons and this helper are not
+/// targets a model should pick from.
+private func listApps() -> AppsResult {
+    let regular = NSWorkspace.shared.runningApplications.filter {
+        $0.activationPolicy == .regular && !$0.isTerminated && $0.bundleIdentifier?.isEmpty == false
+    }
+    var apps: [RunningApp] = []
+    var truncated = regular.count > maxListedApps
+    for running in regular.prefix(maxListedApps) {
+        guard let entry = try? runningApp(running) else { continue }
+        apps.append(entry.app)
+        truncated = truncated || entry.windowsTruncated
+    }
+    return AppsResult(apps: apps, truncated: truncated, accessibilityTrusted: AXIsProcessTrusted())
+}
+
+/// Opens an installed app by exact bundle id through LaunchServices with no
+/// arguments, documents or URLs, or activates the running instance.
+private func launchApp(_ request: Request) async throws -> LaunchResult {
+    guard let bundleId = request.launch?.bundleId,
+          bundleId.range(of: #"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$"#, options: .regularExpression) != nil,
+          bundleId.contains(".") else {
+        throw HelperFailure(code: "invalid_request", message: "launch requires an exact reverse-DNS bundle id")
+    }
+    guard bundleId != Bundle.main.bundleIdentifier else {
+        throw HelperFailure(code: "invalid_request", message: "the helper cannot launch itself")
+    }
+    let existing = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).filter { !$0.isTerminated }
+    if existing.count > 1 {
+        throw HelperFailure(code: "ambiguous_application", message: "\(existing.count) instances of \(bundleId) are running; select one by pid")
+    }
+    var launched = false
+    var running: NSRunningApplication
+    if let only = existing.first {
+        only.activate()
+        running = only
+    } else {
+        running = try await openInstalledApplication(bundleId)
+        launched = true
+    }
+    // A cold launch takes a moment to put up its first window; observing
+    // before then would only report window_not_found. An instance that was
+    // still quitting when we found it is replaced by a fresh launch.
+    let deadline = Date().addingTimeInterval(5)
+    while Date() < deadline {
+        if running.isTerminated || running.bundleIdentifier == nil {
+            guard !launched else { break }
+            running = try await openInstalledApplication(bundleId)
+            launched = true
+            continue
+        }
+        if !AXIsProcessTrusted() || !accessibilityWindows(running).isEmpty { break }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+    return LaunchResult(launched: launched, app: try runningApp(running).app)
+}
+
+private func openInstalledApplication(_ bundleId: String) async throws -> NSRunningApplication {
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
+        throw HelperFailure(code: "application_not_installed", message: "no installed application has bundle id \(bundleId)")
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    configuration.arguments = []
+    configuration.promptsUserIfNeeded = false
+    do {
+        return try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+    } catch {
+        throw HelperFailure(code: "launch_failed", message: "could not open \(bundleId): \(error.localizedDescription)")
+    }
+}
+
 private func handle(_ line: String) async {
     let decoder = JSONDecoder()
     let request: Request
@@ -1843,6 +1995,22 @@ private func handle(_ line: String) async {
             emit(Response<CaptureResult>(
                 id: request.id, ok: false, result: nil,
                 error: ErrorPayload(code: "capture_failed", message: String(describing: error))
+            ))
+        }
+    case "apps":
+        emit(Response(id: request.id, ok: true, result: listApps(), error: nil))
+    case "launch":
+        do {
+            emit(Response(id: request.id, ok: true, result: try await launchApp(request), error: nil))
+        } catch let failure as HelperFailure {
+            emit(Response<LaunchResult>(
+                id: request.id, ok: false, result: nil,
+                error: ErrorPayload(code: failure.code, message: failure.message)
+            ))
+        } catch {
+            emit(Response<LaunchResult>(
+                id: request.id, ok: false, result: nil,
+                error: ErrorPayload(code: "launch_failed", message: String(describing: error))
             ))
         }
     case "act":

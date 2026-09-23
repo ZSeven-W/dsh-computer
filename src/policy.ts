@@ -6,10 +6,17 @@ interface SemanticRiskPattern {
 }
 
 const HIGH_RISK_PATTERNS: readonly SemanticRiskPattern[] = [
-  { category: 'destructive', pattern: /\b(delete|erase|remove|uninstall|destroy|wipe)\b|删除|清除|抹掉|卸载|销毁/iu },
+  { category: 'destructive', pattern: /\b(delete|erase|remove|uninstall|destroy|wipe)\b|删除|抹掉|卸载|销毁/iu },
   { category: 'financial', pattern: /\b(pay|purchase|buy now|checkout|transfer|wire|send money|place order)\b|付款|支付|购买|下单|转账|汇款/iu },
   { category: 'external-commit', pattern: /\b(send|publish|post|submit|share)\b|发送|发布|提交|分享/iu },
 ]
+
+// Web-style and abbreviated names models commonly emit. They must resolve
+// before the allow-list check, or a navigation key is gated as unknown.
+const KEY_ALIASES = new Map([
+  ['esc', 'escape'],
+  ['arrowleft', 'left'], ['arrowright', 'right'], ['arrowup', 'up'], ['arrowdown', 'down'],
+])
 
 const COMMIT_KEYS = new Set(['return', 'enter', 'numpadenter', '\n', '\r', '↩'])
 
@@ -52,7 +59,7 @@ export function normalizeKeyName(value: string): string {
   const normalized = value.trim().toLowerCase()
   if (value === '\n' || value === '\r' || normalized === '↩' || normalized === 'numpadenter') return 'return'
   if (normalized === 'enter') return 'return'
-  return normalized
+  return KEY_ALIASES.get(normalized) ?? normalized
 }
 
 function normalizedChord(action: Extract<ComputerAction, { kind: 'key' }>): string {

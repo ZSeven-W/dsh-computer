@@ -65,6 +65,8 @@ export function apply(ctx: HostContext): () => Promise<void> {
     getService: name => ctx.get(name),
   })
   const disposers: Array<() => void | Promise<void>> = [
+    ctx.effect(() => ctx.tools.register(tools.computerApps), 'dsh-computer:computer_apps'),
+    ctx.effect(() => ctx.tools.register(tools.computerLaunch), 'dsh-computer:computer_launch'),
     ctx.effect(() => ctx.tools.register(tools.computerObserve), 'dsh-computer:computer_observe'),
     ctx.effect(() => ctx.tools.register(tools.computerVisualObserve), 'dsh-computer:computer_visual_observe'),
     ctx.effect(() => ctx.tools.register(tools.computerVisualAct), 'dsh-computer:computer_visual_act'),

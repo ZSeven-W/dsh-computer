@@ -67,6 +67,8 @@ computer_act
 
 | 工具 | 契约 |
 | --- | --- |
+| `computer_apps` | 列出 Dock 可见的运行中 App：精确 bundle id、pid、是否最前，以及 `computer_observe` 可用的 Accessibility 窗口号（`window_number`）。只读；仅在已授予 Accessibility 时列出窗口。 |
+| `computer_launch` | 按精确的反向域名 bundle id 打开已安装 App（已运行则激活），并短暂等待首个窗口出现。不能传参数、文档或 URL，因此不需要审批；路径和显示名会被拒绝。用它代替 shell `open -a`。 |
 | `computer_observe` | 有界读取一个 macOS App/窗口的 Accessibility 树，返回 opaque ref、指纹和过期时间。 |
 | `computer_visual_observe` | 只截取新鲜 observation 绑定的明确编号窗口，做像素校验，把有界 AX Set-of-Mark 编号烙入图片，再通过 DSH 附件交给当前这一路支持图片的模型。 |
 | `computer_visual_act` | 对同一份截图的附件图像像素执行 `click`、`drag` 或 `scroll`；必须先经宿主批准，工具只用受信任的附件几何信息把附件像素换算成原生像素，不接受模型提供的缩放或原生坐标。 |
@@ -86,7 +88,7 @@ computer_act
 - ref 随机、opaque、只在内存保存，1–30 秒自动过期。
 - 一次观察只允许一次可能产生变更的动作；动作被接受或结果不确定后，该观察下的所有 ref 立即失效，Agent 必须重新观察。
 - 动作前精确比较 bundle id、PID、启动身份、窗口身份、role/subrole、name、identifier、frame 和安全角色。
-- 实时 AX name/identifier 语义命中删除、资金、发送、发布或分享的点击，`Return`/`Enter` 提交键，以及明确导航白名单之外的按键组合，都需要宿主向所属用户展示上下文并取得一次性的 `allowed-once`。安全 focus/导航不弹审批；模型无法传入或伪造审批参数。
+- 实时 AX name/identifier 语义命中删除、资金、发送、发布或分享的点击，`Return`/`Enter` 提交键，以及明确导航白名单之外的按键组合，都需要宿主向所属用户展示上下文并取得一次性的 `allowed-once`。安全 focus/导航不弹审批；`esc` 与 `arrowleft`/`arrowright`/`arrowup`/`arrowdown` 会归一为 `escape`/`left`/`right`/`up`/`down`。用 `key` 发送可打印字符属于非导航组合键，每次都会弹审批——请改为点击屏幕按钮或使用 `type`。「清除」(Clear) 在中英文下都不算破坏性操作；删除/抹掉/卸载/销毁（delete/erase/remove）仍需审批。模型无法传入或伪造审批参数。
 - 审批绑定实时 Agent/tool call、observation fingerprint、action digest、风险类别、opaque ref digest 和单请求 nonce。Driver 在询问前、批准后各重新观察一次；目标变化、过期或 scope 被销毁时，该次批准会被消费，但绝不下发动作。
 - 每个视觉坐标动作都按 AX-opaque 未知目标处理，一律要求宿主一次性的 `allowed-once`；询问前和派发前重新核验并截图同一窗口。坐标点或拖拽终点下发现密码等安全字段时直接拒绝。
 - 密码框输入仍然永久拒绝，不能通过审批放行。
@@ -118,6 +120,8 @@ ctx.inject([COMPUTER_DRIVER_SERVICE], (driverCtx) => {
 ```
 
 当前 `contractVersion` 为 `5`。v3 新增了 `scroll` 动作；v4 让证据对截断保持诚实（`computer_evidence` 现携带 `receipts_total`/`receipts_dropped`/`receipts_returned`/`bounded`），将观察淘汰改为 TTL 优先而非按数量，并把每个未标记的 Set-of-Mark 目标都写入 `omitted`。v5 新增面向 AX-opaque 自定义控件的坐标回退 `computer_visual_act`：`computer_visual_observe` 会保存按 PNG SHA-256 绑定的截图几何信息，DSH 工具用受信任的附件几何把附件像素换算成原生像素，Driver 在要求宿主审批前后都会重新截图并核验同一窗口，然后才派发 `click`/`drag`/`scroll`。视觉派发回执一律是 `unknown`，绝不写成 `confirmed`；消费者应重新观察来判断效果，且不得盲目重试 `unknown`。Evidence 现在从同一个有界回执环返回类型化的 AX/视觉回执联合，视觉动作不会从 `computer_evidence` 中消失。省略原因词汇表：`mark-budget-exceeded`、`static-label`、`target_has_no_frame`、`target_outside_captured_window`、`stale_target: …`。后续消费者应先判断版本，再依赖新增字段。
+
+`listApps()` 与 `launchApp({ bundleId })`（对应 `computer_apps`/`computer_launch`）是 v5 内**可选、增量**的 Driver 方法：锁定 v5 的消费者无需它们，因此版本号不变。调用前先检查方法是否存在。
 
 观察保留还按 Agent 作用域做字节预算（32 MiB 序列化负载）：新观察会超出预算时，先淘汰最旧的 TTL 有效观察——同样以 `OBSERVATION_EVICTED` 报告——且最新一次观察永不被淘汰。
 

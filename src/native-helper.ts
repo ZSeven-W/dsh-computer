@@ -27,6 +27,8 @@ import type {
   NativeStatusResult,
   NativeTransport,
   NativeVisualActResult,
+  NativeAppsResult,
+  NativeLaunchResult,
 } from './native-protocol.js'
 import { pluginEnv } from './plugin-env.js'
 
@@ -760,7 +762,7 @@ export class NativeHelper implements NativeTransport {
     }
   }
 
-  async request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult>(
+  async request<T extends NativeStatusResult | NativeObserveResult | NativeActionResult | NativeCaptureResult | NativeVisualActResult | NativeAppsResult | NativeLaunchResult>(
     request: NativeRequest,
     options: { scopeId: string; signal?: AbortSignal },
   ): Promise<T> {

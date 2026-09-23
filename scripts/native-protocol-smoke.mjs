@@ -188,7 +188,33 @@ const invalidGrantText = JSON.stringify(invalidGrant)
 if (invalidGrant.ok || invalidGrant.error?.code !== 'invalid_request' || invalidGrantText.includes(privateSentinel)) {
   throw new Error(`invalid approval did not fail closed without reflection: ${invalidGrantText}`)
 }
+// App discovery is read-only and needs no grant, so it must succeed anywhere.
+const apps = await request({ id: 'apps-smoke', command: 'apps' })
+if (!apps.ok || !Array.isArray(apps.result?.apps) || typeof apps.result.truncated !== 'boolean'
+  || apps.result.accessibilityTrusted !== status.result.accessibilityTrusted) {
+  throw new Error(`unexpected apps response: ${JSON.stringify(apps)}`)
+}
+for (const [index, app] of apps.result.apps.entries()) {
+  requireOwn(app, ['bundleId', 'pid', 'launchIdentity', 'name', 'active', 'windows'], `apps.result.apps[${index}]`)
+  if (!apps.result.accessibilityTrusted && app.windows.length !== 0) {
+    throw new Error(`apps listed windows without Accessibility trust: ${JSON.stringify(app)}`)
+  }
+  for (const window of app.windows) requireOwn(window, ['number', 'title', 'frame'], `apps.result.apps[${index}].windows`)
+}
+// Launch is exercised only on inputs that must never open anything.
+for (const [bundleId, code] of [
+  ['/System/Applications/Calculator.app', 'invalid_request'],
+  ['file:///System/Applications/Calculator.app', 'invalid_request'],
+  ['dev.zseven.dsh-computer.no-such-app', 'application_not_installed'],
+]) {
+  const launch = await request({ id: 'launch-smoke', command: 'launch', launch: { bundleId } })
+  if (launch.ok || launch.error?.code !== code) {
+    throw new Error(`launch of ${bundleId} did not fail with ${code}: ${JSON.stringify(launch)}`)
+  }
+}
+
 console.log(JSON.stringify({
+  appDiscovery: { apps: apps.result.apps.length, accessibilityTrusted: apps.result.accessibilityTrusted },
   nativeStatus: status.result,
   approvalDecode: { validRejectedBeforePreflight: true, invalidFailedClosed: true },
   boundedObserve: observe.ok

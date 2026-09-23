@@ -339,6 +339,40 @@ export interface ComputerApprovalGate {
  * Context supplied by a trusted host integration. `scopeId` must come from the
  * live Agent/session identity, never from model arguments.
  */
+/** One normal-layer window of a running application, as the window server lists it. */
+export interface ComputerAppWindow {
+  /** Window number accepted by computer_observe `window_number`. */
+  number: number
+  /** Null when the window has no Accessibility title. */
+  title: string | null
+  frame: ComputerFrame
+}
+
+export interface ComputerRunningApp extends ComputerAppIdentity {
+  /** True for the frontmost application. */
+  active: boolean
+  windows: ComputerAppWindow[]
+}
+
+export interface ComputerAppList {
+  apps: ComputerRunningApp[]
+  /** True when the app or per-app window budget cut the list short. */
+  truncated: boolean
+  /** Windows are listed only with Accessibility trust; false means every `windows` array is empty. */
+  accessibilityTrusted: boolean
+}
+
+export interface ComputerLaunchRequest {
+  /** Exact bundle identifier of an installed application. */
+  bundleId: string
+}
+
+export interface ComputerLaunchResult {
+  /** True when the app was not running before this call. */
+  launched: boolean
+  app: ComputerRunningApp
+}
+
 export interface ComputerDriverContext {
   scopeId: string
   signal?: AbortSignal
@@ -356,6 +390,13 @@ export interface ComputerDriver {
   act(action: ComputerAction, context: ComputerDriverContext): Promise<ComputerActionReceipt>
   visualAct(action: ComputerVisualAction, context: ComputerDriverContext): Promise<ComputerVisualActionReceipt>
   evidence(context: ComputerDriverContext, options?: { limit?: number }): Promise<ComputerEvidence>
+  /**
+   * Additive, optional within contract v5: consumers that pin v5 never call
+   * these, so the pin still holds for drivers that do not implement them.
+   */
+  listApps?(context: ComputerDriverContext): Promise<ComputerAppList>
+  /** Open or activate an installed application by exact bundle id, with no arguments, documents or URLs. */
+  launchApp?(request: ComputerLaunchRequest, context: ComputerDriverContext): Promise<ComputerLaunchResult>
   disposeScope(scopeId: string): Promise<void>
   dispose(): Promise<void>
 }
