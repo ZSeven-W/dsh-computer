@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <sub>Package: <code>@zseven-w/dsh-computer</code> &middot; Local candidate: <code>0.1.0-rc.2</code> &middot; Runtime: macOS + Node.js <code>&gt;=24.11.0</code></sub>
+  <sub>Package: <code>@zseven-w/dsh-computer</code> &middot; Local candidate: <code>0.1.0-rc.3</code> &middot; Runtime: macOS + Node.js <code>&gt;=24.11.0</code></sub>
 </p>
 
 <p align="center">

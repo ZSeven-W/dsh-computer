@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <sub>包名：<code>@zseven-w/dsh-computer</code> &middot; 本地候选版本：<code>0.1.0-rc.2</code> &middot; 运行环境：macOS + Node.js <code>&gt;=24.11.0</code></sub>
+  <sub>包名：<code>@zseven-w/dsh-computer</code> &middot; 本地候选版本：<code>0.1.0-rc.3</code> &middot; 运行环境：macOS + Node.js <code>&gt;=24.11.0</code></sub>
 </p>
 
 <p align="center">
