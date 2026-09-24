@@ -1,0 +1,74 @@
+# Publish to npm when a version tag is pushed.
+#
+# Authentication: npm trusted publishing (OIDC) only. The workflow proves its
+# identity to the registry (hence `permissions.id-token: write`); there is no
+# token secret and nothing to log in to. The trust relationship is configured
+# once per package (npm-oidc-setup.sh, or npmjs.com -> package -> Settings ->
+# Trusted Publisher -> GitHub Actions, this repository, release.yml).
+#
+# Every release publishes straight to `latest`, prereleases included: in this
+# 0.x line each rc is the version users should get, and OIDC can only set the
+# tag of the publish itself (moving a dist-tag afterwards would need a login).
+#
+# This publishes the npm package only. The signed and notarized helper app is
+# a separate, local release (scripts/release/release.mjs, RELEASE.md).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: macos-15   # Package.swift needs Swift 6, and prepack runs the Swift suite
+    permissions:
+      id-token: write   # required for trusted publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.0'
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # The bundled npm predates trusted publishing.
+      - run: npm install -g npm@11
+
+      - run: pnpm install --frozen-lockfile
+
+      # The tag must match what is about to be published, or the release
+      # silently ships a version nobody asked for.
+      - name: Verify the tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $tag does not match package.json $pkg" >&2
+            exit 1
+          fi
+
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+      # Publishing is skipped when the registry already has this version, so a
+      # re-pushed tag or a version first published by hand does not turn red.
+      # npm publish still runs prepack and prepublishOnly (build, tests and
+      # the packed-install smoke) against exactly what it uploads.
+      - name: Publish
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          pkg="$(node -p "require('./package.json').version")"
+          if npm view "$name@$pkg" version >/dev/null 2>&1; then
+            echo "$name@$pkg is already on the registry — nothing to publish."
+            exit 0
+          fi
+          npm publish --access public --tag latest
